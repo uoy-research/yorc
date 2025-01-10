@@ -34,10 +34,11 @@ SUCH DAMAGE.
 
 import numpy as np
 import copy
-from sys import exit
+from sys import exit, argv
 import argparse
 import mne
 import os
+import pathlib
 
 # Approximate distance from Rubidium chamber to external tip of
 # sensor housing that makes contact with head
@@ -68,45 +69,11 @@ def pick_points(pcd):
     vis.destroy_window()
     return vis.get_picked_points()
 
-
-def preprocess_point_cloud(pcd, voxel_size):
-    import open3d as o3d
-    pcd_down = pcd.voxel_down_sample(voxel_size)
-
-    radius_normal = voxel_size * 2
-    pcd_down.estimate_normals(
-        o3d.geometry.KDTreeSearchParamHybrid(radius=radius_normal, max_nn=30))
-
-    radius_feature = voxel_size * 5
-    pcd_fpfh = o3d.pipelines.registration.compute_fpfh_feature(
-        pcd_down,
-        o3d.geometry.KDTreeSearchParamHybrid(radius=radius_feature, max_nn=100))
-    return pcd_down, pcd_fpfh
-
-
-def execute_global_registration(source_down, target_down, source_fpfh,
-                                target_fpfh, voxel_size):
-    import open3d as o3d
-    distance_threshold = voxel_size * 1.5
-    result = o3d.pipelines.registration.registration_ransac_based_on_feature_matching(
-        source_down, target_down, source_fpfh, target_fpfh, True,
-        distance_threshold,
-        o3d.pipelines.registration.TransformationEstimationPointToPoint(False),
-        3, [
-            o3d.pipelines.registration.CorrespondenceCheckerBasedOnEdgeLength(
-                0.9),
-            o3d.pipelines.registration.CorrespondenceCheckerBasedOnDistance(
-                distance_threshold)
-        ], o3d.pipelines.registration.RANSACConvergenceCriteria(100000, 0.999))
-    return result
-
-
 def vis_controls():
     print("\nControls:")
     print("  Shift + Left-Click:  Add a point.")
     print("  Shift + Right-Click: Remove a point.")
     print("  Hit q when all points are made.\n")
-
 
 def head_to_helmet(source_in, landmarks):
     print("\nSetting up...")
@@ -233,26 +200,77 @@ def head_to_head(standard_trans, target_cloud, source_in):
     mesh = o3d.io.read_triangle_mesh(source_in)
     source_cloud = mesh.sample_points_poisson_disk(100000)
 
-    # Global registration
-    voxel_size = 2
-    source_down, source_fpfh = preprocess_point_cloud(source_cloud, voxel_size)
-    target_down, target_fpfh = preprocess_point_cloud(target_cloud, voxel_size)
-    result_global = execute_global_registration(source_down, target_down, source_fpfh, target_fpfh, voxel_size)
-    trans_init = result_global.transformation
+    # Get anchor points
+    print("\nIn order, please select: ")
+    print("  - Right eye")
+    print("  - Left eye")
+    print("  - Tip of nose\n")
+    source_points = pick_points(source_cloud)
+
+    print("\nIn order, please select: ")
+    print("  - Right eye")
+    print("  - Left eye")
+    print("  - Tip of nose\n")
+    target_points = pick_points(target_cloud)
+
+    # create array of corresponding points
+    corr = np.zeros((len(source_points), 2))
+    corr[:, 0] = source_points
+    corr[:, 1] = target_points[0:len(source_points)]
+
+    # Calculate transform based on anchor points alone
+    p2p = o3d.pipelines.registration.TransformationEstimationPointToPoint()
+    trans_init = p2p.compute_transformation(source_cloud, target_cloud,
+                                            o3d.utility.Vector2iVector(corr))
+
+    # Crop both clouds around the target points so that we don't have any
+    # contributions to the refinement from to far away from the face.
+    source_COM = np.zeros(3)
+    target_COM = np.zeros(3)
+    for i in source_points:
+        source_COM += source_cloud.points[i]
+    source_COM = np.divide(source_COM, len(source_points))
+    for i in target_points:
+        target_COM += target_cloud.points[i]
+    target_COM = np.divide(target_COM, len(target_points))
+    radius = 50  # mm
+    points = np.asarray(target_cloud.points)
+
+    # Calculate distances to center, set new points
+    distances = np.linalg.norm(points - target_COM, axis=1)
+    target_crop = o3d.geometry.PointCloud()
+    target_crop.points = o3d.utility.Vector3dVector(points[distances <= radius])
+    radius = 50  # mm
+    points = np.asarray(source_cloud.points)
+
+    # Calculate distances to center, set new points
+    distances = np.linalg.norm(points - source_COM, axis=1)
+    source_crop = o3d.geometry.PointCloud()
+    source_crop.points = o3d.utility.Vector3dVector(points[distances <= radius])
+
+    # Remove some points that aren't part of the contiguous face surface
+    # Find clusters contiguous with the anchor points to do that.
+    labels = np.array(
+            source_crop.cluster_dbscan(eps=5.0, min_points=10, print_progress=True))
+    labels = list(labels)
+    most_common_label = max(labels, key=labels.count)
+    pts = np.asarray(source_crop.points)
+    source_crop.points = o3d.utility.Vector3dVector(pts[np.where(labels == most_common_label)[0]])
 
     # Refine registration with ICP
     threshold = 2.00
     result_icp = o3d.pipelines.registration.registration_icp(
-        source_cloud, target_cloud, threshold, trans_init,
+        source_crop, target_crop, threshold, trans_init,
         o3d.pipelines.registration.TransformationEstimationPointToPoint(),
         o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=8000))
-    source_cop = copy.deepcopy(source_cloud)
-    source_cop.transform(result_icp.transformation)
+    source_crop_cop = copy.deepcopy(source_crop)
+    source_crop_cop.transform(result_icp.transformation)
     print("\nPreview...\n - Press q to contiunue")
-    o3d.visualization.draw_geometries([source_cop, target_cloud],
-                                      zoom=0.8, front=[50.0, 0.0, 0.0],
-                                      lookat=[-1.0, 01.0, 0.0], up=[0, 0, 1],
-                                      width=1000, height=1000)
+    o3d.visualization.draw_geometries([source_crop_cop, target_crop], width=1000, height=1000)
+    source_cloudX2 = copy.deepcopy(source_cloud)
+    source_cloudX2.transform(result_icp.transformation)
+    print("Preview...\n - Press q to contiunue")
+    o3d.visualization.draw_geometries([source_cloudX2, target_cloud], width=1000, height=1000)
     X2 = result_icp.transformation
     return X2
 
@@ -264,36 +282,70 @@ def head_to_mri(target_cloud, source_in):
     mesh = o3d.io.read_triangle_mesh(source_in)
     source_cloud = mesh.sample_points_poisson_disk(100000)
 
-    # Crop MRI to avoid edge effects
-    source_crop = copy.deepcopy(source_cloud)
-    points = np.asarray(source_crop.points)
-    y_threshold = 0.
-    source_crop = source_crop.select_by_index(np.where(points[:, 1] > y_threshold)[0])
-    points = np.asarray(source_crop.points)
-    z_threshold = -100.
-    source_crop = source_crop.select_by_index(np.where(points[:, 2] > z_threshold)[0])
+    # Get anchor points
 
-    # Global registration
-    voxel_size = 2
-    source_down, source_fpfh = preprocess_point_cloud(source_crop, voxel_size)
-    target_down, target_fpfh = preprocess_point_cloud(target_cloud, voxel_size)
-    result_global = execute_global_registration(source_down, target_down, source_fpfh, target_fpfh, voxel_size)
-    trans_init = result_global.transformation
+    print("\nIn order, please select: ")
+    print("  - Right eye")
+    print("  - Left eye")
+    print("  - Naison\n")
+    source_points = pick_points(source_cloud)
+    print("\nIn order, please select: ")
+    print("  - Right eye")
+    print("  - Left eye")
+    print("  - Naison\n")
+    target_points = pick_points(target_cloud)
+
+    # Create array of corresponding points
+    corr = np.zeros((len(source_points), 2))
+    corr[:, 0] = source_points
+    corr[:, 1] = target_points[0:len(source_points)]
+
+    # Calculate transform based on anchor points alone
+    p2p = o3d.pipelines.registration.TransformationEstimationPointToPoint()
+    trans_init = p2p.compute_transformation(source_cloud, target_cloud,
+                                            o3d.utility.Vector2iVector(corr))
+
+    # Crop both clouds around the target points so that we don't have any
+    # contributions to the refinement from to far away from the face.
+    source_COM = np.zeros(3)
+    target_COM = np.zeros(3)
+    for i in source_points:
+        source_COM += source_cloud.points[i]
+    source_COM = np.divide(source_COM, len(source_points))
+    for i in target_points:
+        target_COM += target_cloud.points[i]
+    target_COM = np.divide(target_COM, len(target_points))
+    radius = 50  # mm
+    points = np.asarray(target_cloud.points)
+
+    # Calculate distances to center, set new points
+    distances = np.linalg.norm(points - target_COM, axis=1)
+    target_crop = o3d.geometry.PointCloud()
+    target_crop.points = o3d.utility.Vector3dVector(points[distances <= radius])
+    radius = 50  # mm
+    points = np.asarray(source_cloud.points)
+
+    # Calculate distances to center, set new points
+    distances = np.linalg.norm(points - source_COM, axis=1)
+    source_crop = o3d.geometry.PointCloud()
+    source_crop.points = o3d.utility.Vector3dVector(points[distances <= radius])
 
     # Refine registration with ICP
     threshold = 2.00
     result_icp = o3d.pipelines.registration.registration_icp(
-        source_crop, target_cloud, threshold, trans_init,
+        source_crop, target_crop, threshold, trans_init,
         o3d.pipelines.registration.TransformationEstimationPointToPoint(),
         o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=8000))
-    source_cloud.transform(result_icp.transformation)
+    source_crop_cop = copy.deepcopy(source_crop)
+    source_crop_cop.transform(result_icp.transformation)
     print("\nPreview\nPress q to continue")
-    o3d.visualization.draw_geometries([source_cloud, target_cloud],
-                                      zoom=0.8, front=[50.0, 0.0, 0.0],
-                                      lookat=[-1.0, 01.0, 0.0], up=[0, 0, 1],
-                                      width=1000, height=1000)
+    o3d.visualization.draw_geometries([source_crop_cop, target_crop], width=1000, height=1000)
+    source_cloudX3 = copy.deepcopy(source_cloud)
+    source_cloudX3.transform(result_icp.transformation)
+    print("\nPreview\nPress q to continue")
+    o3d.visualization.draw_geometries([source_cloudX3, target_cloud], width=1000, height=1000)
     X3 = copy.deepcopy(result_icp.transformation)
-    return(source_cloud, X3)
+    return(source_cloudX3, X3)
 
 
 def check_headpoints(mri_cloud, datafile, X21):
@@ -357,14 +409,13 @@ def write_ouput(datafile, X21, X3):
     def is_file(file):
         if not os.path.isfile(file):
             print(f'Error with {file}.')
-            return False
+            return false
         else:
             return True
 
-
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-om", "--outside_mesh", help="LIDAR scan of head outside the MEG Helmet", required=True)
+    parser.add_argument("-om", "--outside_mesh", help="LIDAR scan of head outside the MEG Helmet", required = True)
     parser.add_argument("-im", "--inside_mesh", help="LIDAR scan of head inside the MEG Helmet", required=True)
     parser.add_argument("-s", "--mri_scalp", help="MRI scalp surface from Freesurfer", required=True)
     parser.add_argument("-m", "--megdata", help="MEG data to generate the transform into", nargs='+', required=True)
