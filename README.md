@@ -21,7 +21,12 @@ This project was developed using a Revopoint pop3 camera to record 3D images, an
 
 In order to register the 3D scans with the HEDscan helmet, there must be a set of landmarks positions that can be identified in the 3D images, and which have known coordinates in the MEG device coordinate system.
 
-This repository contains the file Landmarks.pdf which is an image with some landmark labels that can be printed, cut out, and attached to the HEDscan helmet to ease the identification of the landmark positions in the 3D scans.
+This repository contains the file Landmarks.pdf which is an image with some landmark labels that can be printed, cut out, and attached to the HEDscan helmet to ease the identification of the landmark positions in the 3D scans. The labels should be attached to small posts on the helmet, as seen in the images below:
+
+![Image of HEDscan helmet with landmark labels](/images/helmet_side_small.jpg)
+![Image of HEDscan helmet with landmark labels](/images/helmet_diagonal_small.jpg)
+![Image of HEDscan helmet with landmark labels](/images/helmet_front_small.jpg)
+![Image of HEDscan helmet with landmark labels](/images/helmet_landmark_small.jpg)
 
 ## Acquiring 3D scans
 Use a 3D camera to generate two colour-texture meshes of the participants head both inside the MEG helmet:
@@ -50,7 +55,7 @@ source /path/to/coreg_env/bin/activate
 pip3 install -r ./requirements.txt
 ```
 
-## Usage
+## Code Usage
 ```
 source /path/to/coreg_env/bin/activate
 
