@@ -134,7 +134,7 @@ def head_to_helmet(source_in, landmarks):
 
     # Make into cloud
     rst_cloud = o3d.geometry.PointCloud()
-    rst_cloud.points = o3d.utility.Vector3dVector(rsticker_pillars[landmarks[:]])
+    rst_cloud.points = o3d.utility.Vector3dVector(rsticker_pillars)
 
     # Make the true pillar landmarks blue so we can see them relative to red cloud
     rst_cloud.paint_uniform_color([0, 0, 1])
@@ -147,7 +147,6 @@ def head_to_helmet(source_in, landmarks):
     red_points = pick_points(source_cloud)
 
     # Define which sticker-pillar points correspond to which selected points
-    corr = np.zeros((len(rsticker_pillars), 2))
     corr = np.zeros((len(landmarks), 2))
     for ii, lm in enumerate(landmarks):
         corr[ii, 0] = lm  # So users don't have to deal with zero-indexing
@@ -162,11 +161,11 @@ def head_to_helmet(source_in, landmarks):
     # Have a look at anchor-based registration
     test = copy.deepcopy(rst_cloud)
     test.transform(trans_init)
-
     # Print errors on anchor-point registration
     print("\nLandmark co-registration Errors:")
-    for ii, coords in enumerate(test.points):
-        print("%.3f mm " % np.linalg.norm(coords - source_cloud.points[int(corr[ii][1])]))
+    for ii, lm in enumerate(landmarks):
+        print("%.3f mm " % np.linalg.norm(test.points[lm] - source_cloud.points[int(corr[ii][1])]))
+
     return X1
 
 
