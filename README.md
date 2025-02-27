@@ -37,7 +37,7 @@ Use a 3D camera to generate two colour-texture meshes of the participants head b
 
 In each case, start by directing the camera towards the participants right ear, and then circle the camera around the front of the participants head to the left ear, making sure to include the nose, eyebrows, and forehead.
 
-A guide to acquiring the 3D suitable scans using a Revopoint pop3 camera can be found in the ![LIDAR Guide For Operators](/LIDAR_Guide_for_Operators_V1.0.pdf).
+A guide to acquiring suitable 3D scans using a Revopoint pop3 camera can be found in the ![LIDAR Guide For Operators](/LIDAR_Guide_for_Operators_V1.0.pdf).
 
 
 ## MRI data
