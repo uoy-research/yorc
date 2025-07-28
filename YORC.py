@@ -57,7 +57,7 @@ def usage():
 
     exit(0)
 
-def find_landmarks(source_cloud)
+def find_landmarks(source_cloud):
 # Automatically find landmarks when they're red-green roundels
     #Filter for red points in cloud
     red_point_index=[]
@@ -112,9 +112,13 @@ def find_landmarks(source_cloud)
 
     # TODO refine thresholds if wrong number of landmarks found?
     # For now, just check them and advise manual approach if fails
-    if len(good_centre) > 7:
-        print('More than 7 landmarks found in LIDAR, try manual coregistration'
-        exit 0
+    if len(good_centre) > 7 or len(good_centre) <5:
+        print('Could not find landmarks in LIDAR, try manual coregistration')
+        o3d.visualization.draw_geometries([source_cloud],
+                                          zoom=0.8, front=[50.0, 0.0, 0.0],
+                                          lookat=[-1.0, 01.0, 0.0], up=[0, 0, 1],
+                                          width=1000, height=1000)
+        exit(0)
 
     return good_centre
 
@@ -169,7 +173,7 @@ def vis_controls():
     print("  Hit q when all points are made.\n")
 
 
-def head_to_helmet(source_in, landmarks):
+def head_to_helmet(source_in):
     print("\nSetting up...")
     import open3d as o3d
     o3d.utility.set_verbosity_level(o3d.utility.VerbosityLevel.Error)
@@ -191,8 +195,7 @@ def head_to_helmet(source_in, landmarks):
     rsticker_pillars[5] = [-92.079, 66.226, -27.207]
     rsticker_pillars[6] = [-102.325, 0.221, 16.345]
 
-    landmarks = np.asarray(landmarks)-1
-
+    
     # Make into cloud
     rst_cloud = o3d.geometry.PointCloud()
     rst_cloud.points = o3d.utility.Vector3dVector(rsticker_pillars)
@@ -209,9 +212,11 @@ def head_to_helmet(source_in, landmarks):
     # Calculate best fit of lidar points to known positions
     threshold = 50.0
     # Initialize trans array
-    trans_init = np.asarray([[0.862, 0.011, -0.507, 0.5],
-                             [-0.139, 0.967, -0.215, 0.7],
-                             [0.487, 0.255, 0.835, -1.4], [0.0, 0.0, 0.0, 1.0]])
+    trans_init = np.asarray([[-2.94776676e-01,  9.54499888e-01, -4.51295348e-02, -5.54018752e+01],
+                         [-1.71874933e-02,  4.19242712e-02,  9.98972945e-01,  3.98805592e+01],
+                         [ 9.55411587e-01,  2.95249588e-01,  4.04716316e-03,  1.71667824e+02],
+                         [ 0.00000000e+00,  0.00000000e+00,  0.00000000e+00,  1.00000000e+00]])
+
     result_icp = o3d.pipelines.registration.registration_icp(
             red_point_cloud, rst_cloud, threshold, trans_init,
             o3d.pipelines.registration.TransformationEstimationPointToPoint(),
@@ -231,7 +236,7 @@ def head_to_helmet(source_in, landmarks):
     # Print errors on anchor-point registration
     print("\nLandmark co-registration Errors:")
     for ii, lm in enumerate(red_points):
-        print("%.3f mm " % nearest_point_dist(red_points,test_points))
+        print("%.3f mm " % nearest_point_dist(lm,test_points))
 
     return X1
 
@@ -454,7 +459,6 @@ def main():
     parser.add_argument("-im", "--inside_mesh", help="LIDAR scan of head inside the MEG Helmet", required=True)
     parser.add_argument("-s", "--mri_scalp", help="MRI scalp surface from Freesurfer", required=True)
     parser.add_argument("-m", "--megdata", help="MEG data to generate the transform into", nargs='+', required=True)
-    parser.add_argument("-lm", "--landmarks", help="Landmarks to use for helmet registration", type=int, nargs='+')
 
     args = parser.parse_args()
 
@@ -468,12 +472,7 @@ def main():
             print(f'Error opening {f}')
             exit(1)
 
-    if args.landmarks is not None:
-        landmarks = args.landmarks
-    else:
-        landmarks = [1, 2, 3, 4, 5, 6, 7]
-
-    X1 = head_to_helmet(helmet_mesh, landmarks)
+    X1 = head_to_helmet(helmet_mesh)
     [standard_trans, standard_head] = head_to_standard(head_mesh)
     X2 = head_to_head(standard_trans, standard_head, helmet_mesh)
     X21 = np.dot(X2, X1)
