@@ -110,6 +110,12 @@ def find_landmarks(source_cloud)
         npoints[cluster_labels[i]] +=1
     good_centre = np.divide(good_centre, npoints)
 
+    # TODO refine thresholds if wrong number of landmarks found?
+    # For now, just check them and advise manual approach if fails
+    if len(good_centre) > 7:
+        print('More than 7 landmarks found in LIDAR, try manual coregistration'
+        exit 0
+
     return good_centre
 
 
@@ -193,33 +199,39 @@ def head_to_helmet(source_in, landmarks):
 
     # Make the true pillar landmarks blue so we can see them relative to red cloud
     rst_cloud.paint_uniform_color([0, 0, 1])
+    
+    # Extract landmark positions from lidar scan
+    red_points = find_landmarks(source_cloud)
+    # Make into cloud
+    red_point_cloud = o3d.geometry.PointCloud()
+    red_point_cloud.points = o3d.utility.Vector3dVector(red_points)
 
-    # Get anchor points
-    vis_controls()
-    print("Select the Helmet Labels from left to right.")
+    # Calculate best fit of lidar points to known positions
+    threshold = 50.0
+    # Initialize trans array
+    trans_init = np.asarray([[0.862, 0.011, -0.507, 0.5],
+                             [-0.139, 0.967, -0.215, 0.7],
+                             [0.487, 0.255, 0.835, -1.4], [0.0, 0.0, 0.0, 1.0]])
+    result_icp = o3d.pipelines.registration.registration_icp(
+            red_point_cloud, rst_cloud, threshold, trans_init,
+            o3d.pipelines.registration.TransformationEstimationPointToPoint(),
+            o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=8000))
 
-    # Display visualiser
-    red_points = pick_points(source_cloud)
-
-    # Define which sticker-pillar points correspond to which selected points
-    corr = np.zeros((len(landmarks), 2))
-    for ii, lm in enumerate(landmarks):
-        corr[ii, 0] = lm  # So users don't have to deal with zero-indexing
-    corr[:, 1] = red_points
-
-    # Calculate transform based on anchor points alone
-    p2p = o3d.pipelines.registration.TransformationEstimationPointToPoint()
-    trans_init = p2p.compute_transformation(rst_cloud, source_cloud,
-                                            o3d.utility.Vector2iVector(corr))
-    X1 = trans_init
+    X1 = result_icp.transformation
 
     # Have a look at anchor-based registration
     test = copy.deepcopy(rst_cloud)
     test.transform(trans_init)
+    test_points = test.points[:]
+    def nearest_point_dist(a,B):
+        dists= np.linalg.norm(a - B,axis=1)
+        return dists.min()
+
+
     # Print errors on anchor-point registration
     print("\nLandmark co-registration Errors:")
-    for ii, lm in enumerate(landmarks):
-        print("%.3f mm " % np.linalg.norm(test.points[lm] - source_cloud.points[int(corr[ii][1])]))
+    for ii, lm in enumerate(red_points):
+        print("%.3f mm " % nearest_point_dist(red_points,test_points))
 
     return X1
 
