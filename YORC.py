@@ -57,6 +57,61 @@ def usage():
 
     exit(0)
 
+def find_landmarks(source_cloud)
+# Automatically find landmarks when they're red-green roundels
+    #Filter for red points in cloud
+    red_point_index=[]
+    corro=[]
+    red_val=[]
+    for i,point in enumerate(np.asarray(source_cloud.colors)):
+        corro.append(1- np.linalg.norm([0.8,0.1,0.3] - point))
+    corro= np.asarray(corro)
+    fifthP = int(len(source_cloud.points)*.020)
+    red_point_index = np.argpartition(corro, -fifthP)[-fifthP:]
+    red_points = source_cloud.select_by_index(red_point_index)
+
+    #Filter for green points in cloud
+    green_point_index=[]
+    corro=[]
+    red_val=[]
+    for i,point in enumerate(np.asarray(source_cloud.colors)):
+        corro.append(1- np.linalg.norm([0.3,0.8,0.3] - point))
+    corro= np.asarray(corro)
+    fifthP = int(len(source_cloud.points)*.020)
+    green_point_index = np.argpartition(corro, -fifthP)[-fifthP:]
+    green_points = source_cloud.select_by_index(green_point_index)
+    # Find overlap of red and green filters
+    #for a point 'a', what's the closest distance in array of points 'B'?
+    def nearest_point_dist(a,B):
+        dists= np.linalg.norm(a - B,axis=1)
+        return dists.min()
+
+    # Keep good points wherin there is a nearby point of the other colour
+    good_points=[]
+    for pp in green_point_index:
+        if nearest_point_dist(source_cloud.points[pp], np.asarray(source_cloud.points)[red_point_index]) <5:
+            good_points.append(pp)
+    for pp in red_point_index:
+        if nearest_point_dist(source_cloud.points[pp], np.asarray(source_cloud.points)[green_point_index]) <5:
+            good_points.append(pp)
+    # Make cloud of points that we believe are part of the target roundels
+    gg_points = source_cloud.select_by_index(good_points)
+   
+    # Cluster the target points, should give us one cluster per target
+    good_eps = 5 # Distance threshold for points in a cluster
+    good_min_points = 10 # Minimum number of points per cluster
+    cluster_labels = np.array(gg_points.cluster_dbscan(eps=good_eps, min_points=good_min_points, print_progress=True))
+    cluster_labels
+    # Get mean position of each cluster (target)
+    good_centre = np.zeros([len(set(cluster_labels)),3])
+    npoints = np.zeros([len(set(cluster_labels)),1])
+    for i,point in enumerate(np.asarray(gg_points.points)):
+        good_centre[cluster_labels[i]] += point
+        npoints[cluster_labels[i]] +=1
+    good_centre = np.divide(good_centre, npoints)
+
+    return good_centre
+
 
 def pick_points(pcd):
     import open3d as o3d
