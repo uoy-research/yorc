@@ -176,6 +176,8 @@ def vis_controls():
 def head_to_helmet(source_in):
     print("\nSetting up...")
     import open3d as o3d
+    from sympy.utilities.iterables import multiset_permutations
+
     o3d.utility.set_verbosity_level(o3d.utility.VerbosityLevel.Error)
     # Align manually selected points from a LIDAR scan with
     # known landmark coordinates
@@ -208,30 +210,47 @@ def head_to_helmet(source_in):
     # Make into cloud
     red_point_cloud = o3d.geometry.PointCloud()
     red_point_cloud.points = o3d.utility.Vector3dVector(red_points)
+    # Sometimes the lidar has not picked up all targets, or else
+    # the colour-filtering approach here to identify them might
+    # have missed some.
 
-    # Calculate best fit of lidar points to known positions
-    threshold = 50.0
-    # Initialize trans array
-    trans_init = np.asarray([[-2.94776676e-01,  9.54499888e-01, -4.51295348e-02, -5.54018752e+01],
-                         [-1.71874933e-02,  4.19242712e-02,  9.98972945e-01,  3.98805592e+01],
-                         [ 9.55411587e-01,  2.95249588e-01,  4.04716316e-03,  1.71667824e+02],
-                         [ 0.00000000e+00,  0.00000000e+00,  0.00000000e+00,  1.00000000e+00]])
+    # Brute force the possible permutations of point correspondence
+    # between the 7 known landmark positions, and the detected ones
+    # Should be a smarter way to do this, but it's quick enough anyway
+    landmarks = [0,1,2,3,4,5,6]
+    landmark_perms = np.asarray([p for p in multiset_permutations(landmarks)])
+    landmark_perms = landmark_perms[:,0:len(red_points)]
+    landmark_perms = np.unique(landmark_perms, axis=1)
 
-    result_icp = o3d.pipelines.registration.registration_icp(
-            red_point_cloud, rst_cloud, threshold, trans_init,
-            o3d.pipelines.registration.TransformationEstimationPointToPoint(),
-            o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=8000))
-
-    X1 = result_icp.transformation
+    # 2 column of correspondence is just the red point array indices
+    corr = np.zeros([len(red_points), 2])
+    corr[0:len(red_points),1] = np.arange(len(red_points))
+    # Define the point-to-point registration
+    p2p = o3d.pipelines.registration.TransformationEstimationPointToPoint()
+    # initialize the best fit as an unfeasibly large value
+    min_err=5000000
+    # Iterate through possible correspondences to find the one that gives
+    # the best fit
+    for landmarks in landmark_perms:
+        corr[:,0] = landmarks
+        # Calculate transform based on anchor points
+        trans = p2p.compute_transformation(rst_cloud, red_point_cloud,
+                                            o3d.utility.Vector2iVector(corr))
+        test = copy.deepcopy(rst_cloud)
+        test.transform(trans)
+        err_trans = p2p.compute_rmse(test, red_point_cloud,
+                                       o3d.utility.Vector2iVector(corr))
+        if err_trans < min_err:
+            min_err = err_trans
+            X1 = trans
 
     # Have a look at anchor-based registration
     test = copy.deepcopy(rst_cloud)
-    test.transform(trans_init)
+    test.transform(X1)
     test_points = test.points[:]
     def nearest_point_dist(a,B):
         dists= np.linalg.norm(a - B,axis=1)
         return dists.min()
-
 
     # Print errors on anchor-point registration
     print("\nLandmark co-registration Errors:")
