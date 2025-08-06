@@ -57,6 +57,71 @@ def usage():
 
     exit(0)
 
+def find_landmarks(source_cloud):
+# Automatically find landmarks when they're red-green roundels
+    #Filter for red points in cloud
+    red_point_index=[]
+    corro=[]
+    red_val=[]
+    for i,point in enumerate(np.asarray(source_cloud.colors)):
+        corro.append(1- np.linalg.norm([0.8,0.1,0.3] - point))
+    corro= np.asarray(corro)
+    fifthP = int(len(source_cloud.points)*.020)
+    red_point_index = np.argpartition(corro, -fifthP)[-fifthP:]
+    red_points = source_cloud.select_by_index(red_point_index)
+
+    #Filter for green points in cloud
+    green_point_index=[]
+    corro=[]
+    red_val=[]
+    for i,point in enumerate(np.asarray(source_cloud.colors)):
+        corro.append(1- np.linalg.norm([0.3,0.8,0.3] - point))
+    corro= np.asarray(corro)
+    fifthP = int(len(source_cloud.points)*.020)
+    green_point_index = np.argpartition(corro, -fifthP)[-fifthP:]
+    green_points = source_cloud.select_by_index(green_point_index)
+    # Find overlap of red and green filters
+    #for a point 'a', what's the closest distance in array of points 'B'?
+    def nearest_point_dist(a,B):
+        dists= np.linalg.norm(a - B,axis=1)
+        return dists.min()
+
+    # Keep good points wherin there is a nearby point of the other colour
+    good_points=[]
+    for pp in green_point_index:
+        if nearest_point_dist(source_cloud.points[pp], np.asarray(source_cloud.points)[red_point_index]) <5:
+            good_points.append(pp)
+    for pp in red_point_index:
+        if nearest_point_dist(source_cloud.points[pp], np.asarray(source_cloud.points)[green_point_index]) <5:
+            good_points.append(pp)
+    # Make cloud of points that we believe are part of the target roundels
+    gg_points = source_cloud.select_by_index(good_points)
+   
+    # Cluster the target points, should give us one cluster per target
+    good_eps = 5 # Distance threshold for points in a cluster
+    good_min_points = 10 # Minimum number of points per cluster
+    cluster_labels = np.array(gg_points.cluster_dbscan(eps=good_eps, min_points=good_min_points, print_progress=True))
+    cluster_labels
+    # Get mean position of each cluster (target)
+    good_centre = np.zeros([len(set(cluster_labels)),3])
+    npoints = np.zeros([len(set(cluster_labels)),1])
+    for i,point in enumerate(np.asarray(gg_points.points)):
+        good_centre[cluster_labels[i]] += point
+        npoints[cluster_labels[i]] +=1
+    good_centre = np.divide(good_centre, npoints)
+
+    # TODO refine thresholds if wrong number of landmarks found?
+    # For now, just check them and advise manual approach if fails
+    if len(good_centre) > 7 or len(good_centre) <5:
+        print('Could not find landmarks in LIDAR, try manual coregistration')
+        o3d.visualization.draw_geometries([source_cloud],
+                                          zoom=0.8, front=[50.0, 0.0, 0.0],
+                                          lookat=[-1.0, 01.0, 0.0], up=[0, 0, 1],
+                                          width=1000, height=1000)
+        exit(0)
+
+    return good_centre
+
 
 def pick_points(pcd):
     import open3d as o3d
@@ -108,9 +173,11 @@ def vis_controls():
     print("  Hit q when all points are made.\n")
 
 
-def head_to_helmet(source_in, landmarks):
+def head_to_helmet(source_in):
     print("\nSetting up...")
     import open3d as o3d
+    from sympy.utilities.iterables import multiset_permutations
+
     o3d.utility.set_verbosity_level(o3d.utility.VerbosityLevel.Error)
     # Align manually selected points from a LIDAR scan with
     # known landmark coordinates
@@ -130,41 +197,65 @@ def head_to_helmet(source_in, landmarks):
     rsticker_pillars[5] = [-92.079, 66.226, -27.207]
     rsticker_pillars[6] = [-102.325, 0.221, 16.345]
 
-    landmarks = np.asarray(landmarks)-1
-
+    
     # Make into cloud
     rst_cloud = o3d.geometry.PointCloud()
     rst_cloud.points = o3d.utility.Vector3dVector(rsticker_pillars)
 
     # Make the true pillar landmarks blue so we can see them relative to red cloud
     rst_cloud.paint_uniform_color([0, 0, 1])
+    
+    # Extract landmark positions from lidar scan
+    red_points = find_landmarks(source_cloud)
+    # Make into cloud
+    red_point_cloud = o3d.geometry.PointCloud()
+    red_point_cloud.points = o3d.utility.Vector3dVector(red_points)
+    # Sometimes the lidar has not picked up all targets, or else
+    # the colour-filtering approach here to identify them might
+    # have missed some.
 
-    # Get anchor points
-    vis_controls()
-    print("Select the Helmet Labels from left to right.")
+    # Brute force the possible permutations of point correspondence
+    # between the 7 known landmark positions, and the detected ones
+    # Should be a smarter way to do this, but it's quick enough anyway
+    landmarks = [0,1,2,3,4,5,6]
+    landmark_perms = np.asarray([p for p in multiset_permutations(landmarks)])
+    landmark_perms = landmark_perms[:,0:len(red_points)]
+    landmark_perms = np.unique(landmark_perms, axis=1)
 
-    # Display visualiser
-    red_points = pick_points(source_cloud)
-
-    # Define which sticker-pillar points correspond to which selected points
-    corr = np.zeros((len(landmarks), 2))
-    for ii, lm in enumerate(landmarks):
-        corr[ii, 0] = lm  # So users don't have to deal with zero-indexing
-    corr[:, 1] = red_points
-
-    # Calculate transform based on anchor points alone
+    # 2 column of correspondence is just the red point array indices
+    corr = np.zeros([len(red_points), 2])
+    corr[0:len(red_points),1] = np.arange(len(red_points))
+    # Define the point-to-point registration
     p2p = o3d.pipelines.registration.TransformationEstimationPointToPoint()
-    trans_init = p2p.compute_transformation(rst_cloud, source_cloud,
+    # initialize the best fit as an unfeasibly large value
+    min_err=5000000
+    # Iterate through possible correspondences to find the one that gives
+    # the best fit
+    for landmarks in landmark_perms:
+        corr[:,0] = landmarks
+        # Calculate transform based on anchor points
+        trans = p2p.compute_transformation(rst_cloud, red_point_cloud,
                                             o3d.utility.Vector2iVector(corr))
-    X1 = trans_init
+        test = copy.deepcopy(rst_cloud)
+        test.transform(trans)
+        err_trans = p2p.compute_rmse(test, red_point_cloud,
+                                       o3d.utility.Vector2iVector(corr))
+        if err_trans < min_err:
+            min_err = err_trans
+            X1 = trans
 
     # Have a look at anchor-based registration
     test = copy.deepcopy(rst_cloud)
-    test.transform(trans_init)
+    test.transform(X1)
+    test_points = test.points[:]
+    def nearest_point_dist(a,B):
+        dists= np.linalg.norm(a - B,axis=1)
+        return dists.min()
+
     # Print errors on anchor-point registration
     print("\nLandmark co-registration Errors:")
-    for ii, lm in enumerate(landmarks):
-        print("%.3f mm " % np.linalg.norm(test.points[lm] - source_cloud.points[int(corr[ii][1])]))
+    for ii, lm in enumerate(red_points):
+        print("%.3f mm " % nearest_point_dist(lm,test_points))
 
     return X1
 
@@ -387,7 +478,6 @@ def main():
     parser.add_argument("-im", "--inside_mesh", help="LIDAR scan of head inside the MEG Helmet", required=True)
     parser.add_argument("-s", "--mri_scalp", help="MRI scalp surface from Freesurfer", required=True)
     parser.add_argument("-m", "--megdata", help="MEG data to generate the transform into", nargs='+', required=True)
-    parser.add_argument("-lm", "--landmarks", help="Landmarks to use for helmet registration", type=int, nargs='+')
 
     args = parser.parse_args()
 
@@ -401,12 +491,7 @@ def main():
             print(f'Error opening {f}')
             exit(1)
 
-    if args.landmarks is not None:
-        landmarks = args.landmarks
-    else:
-        landmarks = [1, 2, 3, 4, 5, 6, 7]
-
-    X1 = head_to_helmet(helmet_mesh, landmarks)
+    X1 = head_to_helmet(helmet_mesh)
     [standard_trans, standard_head] = head_to_standard(head_mesh)
     X2 = head_to_head(standard_trans, standard_head, helmet_mesh)
     X21 = np.dot(X2, X1)

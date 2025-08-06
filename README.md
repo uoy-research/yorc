@@ -63,15 +63,13 @@ Please note that this tool will modify the input MEG data file to add an affine 
 ```
 source /path/to/coreg_env/bin/activate
 
-python3 ./YORC.py -om LIDAR_head_mesh.ply -im LIDAR_helmet_mesh.ply -s Freesurfer_mriscalp.stl -m MEG_run01_raw.fif MEG_run02_raw.fif -lm 1 2 3 4 5 6
+python3 ./YORC.py -om LIDAR_head_mesh.ply -im LIDAR_helmet_mesh.ply -s Freesurfer_mriscalp.stl -m MEG_run01_raw.fif MEG_run02_raw.fif
 ```
-On running the script from a terminal, instructions will be printed to the terminal for the user to mark various anatomical landmarks on cloud meshes of the head in a number of pop-up windows.
+On running the script from a terminal, instructions will be printed to the terminal prompting the user to mark the right pre-auricular, left pre-auricular and nasion on a 3D mesh of the subject. 
 
-1) Helmet 3D scan - Mark the location of registration landmarks on the HEDscan helmet
+You will then be presented with previews illustrating the registration of the two LIDAR images, and the MRI surface.
 
-2) Head 3D scan - Mark the right pre-auricular, left pre-auricular and nasion.
-
-You will then be presented with previews illustrating the registration of the two LIDAR images, and the MRI surface. Then a final illustration of the registered sensor positions on the subject MRI.
+Finally, the user is presented with an illustration of the registered sensor positions on the subject MRI - note that the plotted positions are approximations of the position where the sensor casing contacts the head, not the positions of the magnetically sensitive region which lies ~6 mm further out.
 
 ## Results
 The script will add a device-to-head transform into input MEG data files, and generate a separate trans.fif file containing the MRI-to-head transform, in accordance with the approach used in MNE-python.
