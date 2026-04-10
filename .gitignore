@@ -1,0 +1,18 @@
+# Python cache and bytecode
+__pycache__/
+*.py[cod]
+
+# Python packaging artifacts
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+
+# Local tooling and OS noise
+.DS_Store
+.pytest_cache/
+.ruff_cache/

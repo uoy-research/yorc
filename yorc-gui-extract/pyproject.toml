@@ -1,0 +1,144 @@
+[project]
+name = "yorc"
+version = "0.2.0"
+description = "York OPM Registration Code - GUI and CLI tools for OPM-MEG coregistration"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "mne>=1.8.0",
+    "numpy>=1.26.4",
+    "scipy==1.11.4",
+    "open3d>=0.18.0",
+    "sympy>=1.14.0",
+    "tqdm>=4.66.0",
+    "pyqt6>=6.5.0",
+    "pyvista>=0.44.0",
+    "pyvistaqt>=0.11.0",
+    "vtk>=9.2.0",
+    "pyobjc-framework-cocoa>=12.1; sys_platform == 'darwin'",
+    "pymeshlab>=2025.7.post1",
+    "nibabel>=5.3.3",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-qt", "pytest-cov"]
+
+[project.scripts]
+yorc-gui = "scripts.yorc_gui:main"
+yorc-tripanel-gui = "scripts.tripanel_registration_gui:main"
+
+# ============================================================================
+# Setuptools Configuration - Package Discovery
+# ============================================================================
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["yorc", "scripts"]
+exclude = ["tests*", "archive*", "data*", "images*", "*.tests"]
+
+# ============================================================================
+# RUFF Configuration - Python Linting & Formatting
+# ============================================================================
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+include = ["*.py", "*.pyi"]
+exclude = [
+    ".git",
+    ".venv",
+    "__pycache__",
+    "build",
+    "dist",
+    ".eggs",
+    "*.egg",
+    "scripts/yorc_gui.py",
+]
+
+[tool.ruff.lint]
+# E: Pycodestyle errors
+# F: Pyflakes
+# W: Pycodestyle warnings
+# I: Isort import sorting
+# C: McCabe complexity
+# B: Bugbear
+select = ["E", "F", "W", "I", "C", "B"]
+ignore = [
+    "E501",  # Line too long (handled by formatter)
+    "C901",  # Function too complex (just warning)
+]
+
+[tool.ruff.lint.isort]
+# Import sorting configuration
+known-first-party = ["yorc"]
+known-third-party = ["numpy", "scipy", "mne", "open3d", "pyvista"]
+combine-as-imports = true
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.format]
+# Match Black's formatting style
+docstring-code-format = true
+skip-magic-trailing-comma = false
+
+# ============================================================================
+# Pytest Configuration - Testing Framework
+# ============================================================================
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "-v",
+    "--strict-markers",
+    "--tb=short",
+    "--disable-warnings",
+]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests",
+    "gui: marks tests that require GUI (may need display)",
+    "requires_display: marks tests that need X11/display",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::PendingDeprecationWarning",
+]
+
+# ============================================================================
+# Coverage Configuration - Test Coverage Analysis
+# ============================================================================
+[tool.coverage.run]
+source = ["yorc"]
+branch = true
+omit = [
+    "*/tests/*",
+    "*/test_*.py",
+    "*/__pycache__/*",
+    "*/site-packages/*",
+]
+
+[tool.coverage.report]
+precision = 2
+show_missing = true
+skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "if sys.version_info",
+    "@abstractmethod",
+]
+
+[tool.coverage.html]
+directory = "htmlcov"
+
+# ============================================================================
+# Build System Configuration
+# ============================================================================
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
