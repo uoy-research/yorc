@@ -68,6 +68,7 @@ from yorc.gui.viewer_3d import Viewer3D
 from yorc.gui.viewer_3d_native import Viewer3DNative
 
 DEBUG_LOG_PATH = Path(tempfile.gettempdir()) / "yorc_tripanel_debug.log"
+OUTSIDE_INITIAL_ROTATION_DEG = 90.0
 
 
 def _tripanel_debug_log(message: str) -> None:
@@ -90,6 +91,43 @@ def _surface_vertices_to_mm(vertices: np.ndarray) -> np.ndarray:
     max_abs = float(np.max(np.abs(verts)))
     scale = 1000.0 if max_abs < 1.0 else 1.0
     return verts * scale
+
+
+def _rotation_about_centroid_z(angle_degrees: float, centroid: np.ndarray) -> np.ndarray:
+    angle_radians = np.deg2rad(float(angle_degrees))
+    cos_theta = float(np.cos(angle_radians))
+    sin_theta = float(np.sin(angle_radians))
+    rotation = np.array(
+        [
+            [cos_theta, -sin_theta, 0.0],
+            [sin_theta, cos_theta, 0.0],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=float,
+    )
+    center = np.asarray(centroid, dtype=float)
+    transform = np.eye(4, dtype=float)
+    transform[:3, :3] = rotation
+    transform[:3, 3] = center - rotation @ center
+    return transform
+
+
+def _apply_default_outside_initial_rotation(
+    cloud: o3d.geometry.PointCloud,
+    mesh: Optional[o3d.geometry.TriangleMesh],
+    angle_degrees: float = OUTSIDE_INITIAL_ROTATION_DEG,
+) -> tuple[o3d.geometry.PointCloud, Optional[o3d.geometry.TriangleMesh]]:
+    if cloud is None or cloud.is_empty() or abs(float(angle_degrees)) < 1e-9:
+        return cloud, mesh
+
+    rotated_cloud = copy.deepcopy(cloud)
+    rotated_mesh = copy.deepcopy(mesh) if mesh is not None else None
+    centroid = np.mean(np.asarray(rotated_cloud.points), axis=0)
+    transform = _rotation_about_centroid_z(angle_degrees, centroid)
+    rotated_cloud.transform(transform)
+    if rotated_mesh is not None and not rotated_mesh.is_empty():
+        rotated_mesh.transform(transform)
+    return rotated_cloud, rotated_mesh
 
 
 def _load_any_cloud(path: str, sample_points: int = 50000) -> o3d.geometry.PointCloud:
@@ -1513,6 +1551,9 @@ class TriplePanelRegistrationWindow(QMainWindow):
         mri_mesh: Optional[o3d.geometry.TriangleMesh],
     ) -> None:
         try:
+            outside_cloud, outside_mesh = _apply_default_outside_initial_rotation(
+                outside_cloud, outside_mesh
+            )
             self.inside_cloud = inside_cloud
             self.outside_cloud = outside_cloud
             self.mri_cloud = mri_cloud
@@ -1526,6 +1567,9 @@ class TriplePanelRegistrationWindow(QMainWindow):
             self._log(f"Inside points: {inside_n:,}")
             self._log(f"Outside points: {outside_n:,}")
             self._log(f"MRI points: {mri_n:,}")
+            self._log(
+                f"Applied default outside initial rotation: {OUTSIDE_INITIAL_ROTATION_DEG:.0f} deg about +z."
+            )
             if self.inside_mesh is not None and not self.inside_mesh.is_empty():
                 self._log(f"Inside mesh triangles: {len(np.asarray(self.inside_mesh.triangles)):,}")
                 self.inside_view.add_mesh(
