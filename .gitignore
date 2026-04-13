@@ -18,3 +18,6 @@ yorc-gui-extract/uv.lock
 .DS_Store
 .pytest_cache/
 .ruff_cache/
+
+#outputs from tests
+yorc-gui-extract/experiments/auto_registration/outputs/
