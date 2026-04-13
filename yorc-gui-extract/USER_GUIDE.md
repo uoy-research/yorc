@@ -128,6 +128,10 @@ uv run yorc-tripanel-gui \
   --auto-load
 ```
 
+The screenshot below shows the default tri-panel layout with sample data loaded, including the input-file rows, top workflow buttons, and the three synchronized 3D views used during picking and registration.
+
+![Tri-panel GUI with sample data loaded](images/tripanel-gui.png)
+
 Available flags:
 
 - `-im, --inside-mesh` — inside helmet scan (`.ply/.stl/.obj/.pcd`)
