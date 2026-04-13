@@ -180,7 +180,7 @@ Picking controls:
 
 Useful controls:
 - `Fast Mode`: faster ICP
-- `Stabilize ICP`: extra ICP rounds
+- `Stabilize ICP`: extra ICP rounds; enabled by default
 - `Legacy Mode`: default workflow; disables the inside/outside face pick buttons and uses matching outside/MRI anatomy points
 - `Auto Helmet Fids`: detect red/green helmet stickers automatically
 - `Save Picks` / `Load Picks`: reuse landmarks

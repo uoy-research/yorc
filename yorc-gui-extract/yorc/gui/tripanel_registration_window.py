@@ -1248,7 +1248,7 @@ class TriplePanelRegistrationWindow(QMainWindow):
         layout.addWidget(self.fast_mode_check)
 
         self.stabilize_icp_check = QCheckBox("Stabilize ICP")
-        self.stabilize_icp_check.setChecked(False)
+        self.stabilize_icp_check.setChecked(True)
         self.stabilize_icp_check.setToolTip(
             "Run extra ICP rounds until RMSE change is small (slower, may improve fit)."
         )
