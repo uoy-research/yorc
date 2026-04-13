@@ -132,6 +132,8 @@ The screenshot below shows the default tri-panel layout with sample data loaded,
 
 ![Tri-panel GUI with sample data loaded](images/tripanel-gui.png)
 
+In the screenshot, the `Modes` section sits above the three views and controls `Fast Mode`, `Stabilize ICP`, and `Legacy Mode`. `Legacy Mode` is enabled by default and is the recommended starting workflow for the sample data.
+
 Available flags:
 
 - `-im, --inside-mesh` — inside helmet scan (`.ply/.stl/.obj/.pcd`)
