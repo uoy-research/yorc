@@ -145,17 +145,25 @@ Notes:
 
 ## 9. In-GUI Workflow
 
+Two workflows are available:
+
+- `Legacy Mode` enabled: uses auto/manual inside helmet fiducials plus matching outside and MRI anatomy points. Pick both sets in the order `RPA, LPA, Nasion`.
+- `Legacy Mode` disabled: uses the full tri-panel workflow with additional facial correspondences.
+
 1. `Load Data` (or auto-load from CLI)
 2. For the inside helmet panel, either:
   1. click `Auto Helmet Fids`, or
   2. manually pick the 7 inside fiducials
-3. Pick the remaining points in order:
+3. If `Legacy Mode` is enabled:
+  1. pick `Outside anatomy (3)` in the order `RPA, LPA, Nasion`
+  2. pick `MRI anatomy (3)` in the order `RPA, LPA, Nasion`
+  3. click `Compute Transforms`
+4. If `Legacy Mode` is disabled, pick the remaining points in order:
    1. Inside fiducials (7)
    2. Outside anatomy (3)
    3. Inside face (3)
    4. Outside face (3)
    5. MRI face (3)
-4. `Compute Transforms`
 5. `Preview Sensors`
 6. `Apply to FIF` (writes transforms)
 7. Optional: `Export BIDS Fids` (writes BIDS-compatible fiducials to MEG FIF metadata and T1 JSON)
@@ -167,6 +175,7 @@ Picking controls:
 Useful controls:
 - `Fast Mode`: faster ICP
 - `Stabilize ICP`: extra ICP rounds
+- `Legacy Mode`: default workflow; disables the inside/outside face pick buttons and uses matching outside/MRI anatomy points
 - `Auto Helmet Fids`: detect red/green helmet stickers automatically
 - `Save Picks` / `Load Picks`: reuse landmarks
 - `Show X2 Overlay`, `Show X3 Overlay`, `Restore Views`

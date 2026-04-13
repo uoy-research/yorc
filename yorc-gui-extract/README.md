@@ -70,9 +70,8 @@ Then launch the GUI with the sample files pre-loaded:
 
 ## What This Extract Does Not Include
 
-- Legacy monolithic script workflows (`YORC.py`)
-- Archived experimental GUI branches
 
+The GUI supports both the full tri-panel workflow and a `Legacy Mode` that defaults on startup and uses auto/manual helmet fiducials plus matching outside and MRI anatomy picks (`RPA`, `LPA`, `Nasion`) for a more robust legacy-style workflow.
 ## Troubleshooting
 
 - If the GUI does not appear, keep the terminal open and inspect startup output.

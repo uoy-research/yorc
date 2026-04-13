@@ -11,6 +11,8 @@ dist/
 # Virtual environments
 .venv/
 venv/
+yorc-gui-extract/sampleData/
+yorc-gui-extract/uv.lock
 
 # Local tooling and OS noise
 .DS_Store

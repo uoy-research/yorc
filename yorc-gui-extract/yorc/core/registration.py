@@ -154,6 +154,184 @@ def _nearest_point_dist(a, B):
     return dists.min()
 
 
+def _make_rigid_transform(rotation, translation):
+    """Build a rigid 4x4 transform from rotation and translation."""
+    transform = np.eye(4, dtype=float)
+    transform[:3, :3] = np.asarray(rotation, dtype=float)
+    transform[:3, 3] = np.asarray(translation, dtype=float)
+    return transform
+
+
+def _rotation_about_centroid(rotation, centroid):
+    """Create a rigid transform that rotates about a fixed centroid."""
+    rotation = np.asarray(rotation, dtype=float)
+    centroid = np.asarray(centroid, dtype=float)
+    translation = centroid - rotation @ centroid
+    return _make_rigid_transform(rotation, translation)
+
+
+def _flip_initializations(source_cloud, target_cloud, base_transform):
+    """Generate alternate rigid initializations to escape symmetric 180-degree minima."""
+    base_transform = project_to_rigid_transform(base_transform)
+    target_centroid = np.mean(np.asarray(target_cloud.points), axis=0)
+
+    rotations = [
+        ("identity", np.eye(3, dtype=float)),
+        ("rot_x_180", np.diag([1.0, -1.0, -1.0])),
+        ("rot_y_180", np.diag([-1.0, 1.0, -1.0])),
+        ("rot_z_180", np.diag([-1.0, -1.0, 1.0])),
+    ]
+
+    initializations = []
+    seen = set()
+    for label, rotation in rotations:
+        init = _rotation_about_centroid(rotation, target_centroid) @ base_transform
+        init = project_to_rigid_transform(init)
+        key = tuple(np.round(init, decimals=6).ravel())
+        if key in seen:
+            continue
+        seen.add(key)
+        initializations.append((label, init))
+
+    return initializations
+
+
+def _principal_axes(points):
+    """Return a right-handed principal-axis basis and centroid for a point set."""
+    points = np.asarray(points, dtype=float)
+    centroid = np.mean(points, axis=0)
+    centered = points - centroid
+    cov = centered.T @ centered / max(len(points), 1)
+    eigenvalues, eigenvectors = np.linalg.eigh(cov)
+    order = np.argsort(eigenvalues)[::-1]
+    basis = eigenvectors[:, order]
+    if np.linalg.det(basis) < 0:
+        basis[:, -1] *= -1.0
+    return basis, centroid
+
+
+def _principal_axis_initializations(source_cloud, target_cloud):
+    """Generate rigid initializations from principal-axis alignment with sign permutations."""
+    source_basis, source_centroid = _principal_axes(np.asarray(source_cloud.points))
+    target_basis, target_centroid = _principal_axes(np.asarray(target_cloud.points))
+
+    sign_options = [
+        ("pca_identity", np.diag([1.0, 1.0, 1.0])),
+        ("pca_flip_xy", np.diag([-1.0, -1.0, 1.0])),
+        ("pca_flip_xz", np.diag([-1.0, 1.0, -1.0])),
+        ("pca_flip_yz", np.diag([1.0, -1.0, -1.0])),
+    ]
+
+    initializations = []
+    for label, sign_matrix in sign_options:
+        rotation = target_basis @ sign_matrix @ source_basis.T
+        if np.linalg.det(rotation) < 0:
+            continue
+        translation = target_centroid - rotation @ source_centroid
+        init = project_to_rigid_transform(_make_rigid_transform(rotation, translation))
+        initializations.append((label, init))
+
+    return initializations
+
+
+def _canonical_mri_to_head_initializations(source_cloud, target_cloud):
+    """Generate rigid initializations from expected MRI RAS to head-standard axes."""
+    source_points = np.asarray(source_cloud.points, dtype=float)
+    target_points = np.asarray(target_cloud.points, dtype=float)
+    if len(source_points) == 0 or len(target_points) == 0:
+        return []
+
+    source_centroid = np.mean(source_points, axis=0)
+    target_centroid = np.mean(target_points, axis=0)
+
+    # FreeSurfer/MRI scalp is typically RAS: +x right, +y anterior, +z superior.
+    # YORC standard space expects +x anterior, +y left, +z superior.
+    ras_to_head = np.array(
+        [
+            [0.0, 1.0, 0.0],
+            [-1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ]
+    )
+    variants = [
+        ("ras_to_head", ras_to_head),
+        ("ras_to_head_rot_x_180", np.diag([1.0, -1.0, -1.0]) @ ras_to_head),
+        ("ras_to_head_rot_y_180", np.diag([-1.0, 1.0, -1.0]) @ ras_to_head),
+        ("ras_to_head_rot_z_180", np.diag([-1.0, -1.0, 1.0]) @ ras_to_head),
+    ]
+
+    initializations = []
+    for label, rotation in variants:
+        if np.linalg.det(rotation) < 0:
+            continue
+        translation = target_centroid - rotation @ source_centroid
+        init = project_to_rigid_transform(_make_rigid_transform(rotation, translation))
+        initializations.append((label, init))
+
+    return initializations
+
+
+def _deduplicate_initializations(initializations):
+    """Drop duplicate initializations after rounding to a stable tolerance."""
+    deduped = []
+    seen = set()
+    for label, init in initializations:
+        key = tuple(np.round(np.asarray(init, dtype=float), decimals=6).ravel())
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append((label, init))
+    return deduped
+
+
+def _run_best_icp(
+    source_cloud,
+    target_cloud,
+    initializations,
+    threshold=2.0,
+    max_iteration=8000,
+    progress_callback=None,
+    label_prefix=None,
+):
+    """Run ICP from several rigid initializations and keep the best result."""
+    best_result = None
+    best_score = None
+    best_label = None
+
+    for label, init in initializations:
+        result = o3d.pipelines.registration.registration_icp(
+            source_cloud,
+            target_cloud,
+            threshold,
+            init,
+            o3d.pipelines.registration.TransformationEstimationPointToPoint(),
+            o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=max_iteration),
+        )
+        rigid = project_to_rigid_transform(result.transformation)
+        score = (-float(result.fitness), float(result.inlier_rmse))
+        if progress_callback is not None:
+            prefix = f"{label_prefix}: " if label_prefix else ""
+            progress_callback(
+                f"{prefix}ICP candidate {label}: "
+                f"fitness={float(result.fitness):.4f}, rmse={float(result.inlier_rmse):.4f} mm",
+                None,
+            )
+        if best_result is None or score < best_score:
+            best_result = (rigid, float(result.fitness), float(result.inlier_rmse))
+            best_score = score
+            best_label = label
+
+    if progress_callback is not None and best_result is not None:
+        prefix = f"{label_prefix}: " if label_prefix else ""
+        progress_callback(
+            f"{prefix}selected ICP candidate {best_label}: "
+            f"fitness={best_result[1]:.4f}, rmse={best_result[2]:.4f} mm",
+            None,
+        )
+
+    return best_result
+
+
 def head_to_helmet(source_cloud, landmarks=None, progress_callback=None):
     """
     Register LIDAR scan to helmet coordinates using detected landmarks.
@@ -269,7 +447,7 @@ def head_to_standard(target_cloud, anatomical_points):
         # For coordinate-based, we need to create synthetic indices
 
     # Get position of CTF-style origin in original LIDAR data
-    origin = R_aur + (R_aur - L_aur) / 2.0
+    origin = (R_aur + L_aur) / 2.0
 
     # Define anatomical points in 'standard' space
     standard = np.zeros([3, 3])
@@ -333,21 +511,25 @@ def head_to_head(target_cloud, source_cloud, progress_callback=None):
     if progress_callback:
         progress_callback("Refining with ICP...", 50)
 
-    # Refine registration with ICP
+    # Try several rigid initializations to avoid 180-degree flips on symmetric surfaces.
     threshold = 2.00
-    result_icp = o3d.pipelines.registration.registration_icp(
+    init_candidates = _deduplicate_initializations(
+        _flip_initializations(source_cloud, target_cloud, trans_init)
+    )
+    rigid, fitness, _rmse = _run_best_icp(
         source_cloud,
         target_cloud,
-        threshold,
-        trans_init,
-        o3d.pipelines.registration.TransformationEstimationPointToPoint(),
-        o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=8000),
+        init_candidates,
+        threshold=threshold,
+        max_iteration=8000,
+        progress_callback=progress_callback,
+        label_prefix="head_to_head",
     )
 
     if progress_callback:
         progress_callback("Head-to-head registration complete", 100)
 
-    return project_to_rigid_transform(result_icp.transformation), result_icp.fitness
+    return rigid, fitness
 
 
 def head_to_mri(target_cloud, source_cloud, progress_callback=None):
@@ -370,11 +552,20 @@ def head_to_mri(target_cloud, source_cloud, progress_callback=None):
     # Crop MRI to avoid edge effects
     source_crop = copy.deepcopy(source_cloud)
     points = np.asarray(source_crop.points)
-    y_threshold = 0.0
-    source_crop = source_crop.select_by_index(np.where(points[:, 1] > y_threshold)[0])
+    x_threshold = 0.0
+    source_crop = source_crop.select_by_index(np.where(points[:, 0] > x_threshold)[0])
     points = np.asarray(source_crop.points)
     z_threshold = -100.0
     source_crop = source_crop.select_by_index(np.where(points[:, 2] > z_threshold)[0])
+
+    if progress_callback:
+        progress_callback(
+            "MRI crop sizes (x>0 anterior, z>-100 inferior cutoff): "
+            f"full={len(np.asarray(source_cloud.points)):,}, "
+            f"cropped={len(np.asarray(source_crop.points)):,}, "
+            f"target={len(np.asarray(target_cloud.points)):,}",
+            10,
+        )
 
     if progress_callback:
         progress_callback("Computing global registration...", 20)
@@ -391,26 +582,31 @@ def head_to_mri(target_cloud, source_cloud, progress_callback=None):
     if progress_callback:
         progress_callback("Refining with ICP...", 60)
 
-    # Refine registration with ICP
+    # Try several rigid initializations to avoid 180-degree flips on symmetric surfaces.
     threshold = 2.00
-    result_icp = o3d.pipelines.registration.registration_icp(
+    init_candidates = _deduplicate_initializations(
+        _flip_initializations(source_crop, target_cloud, trans_init)
+        + _principal_axis_initializations(source_crop, target_cloud)
+        + _canonical_mri_to_head_initializations(source_crop, target_cloud)
+    )
+    rigid, fitness, _rmse = _run_best_icp(
         source_crop,
         target_cloud,
-        threshold,
-        trans_init,
-        o3d.pipelines.registration.TransformationEstimationPointToPoint(),
-        o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=8000),
+        init_candidates,
+        threshold=threshold,
+        max_iteration=8000,
+        progress_callback=progress_callback,
+        label_prefix="head_to_mri",
     )
 
     # Apply transform to full (uncropped) source cloud
-    rigid = project_to_rigid_transform(result_icp.transformation)
     transformed_cloud = copy.deepcopy(source_cloud)
     transformed_cloud.transform(rigid)
 
     if progress_callback:
         progress_callback("MRI registration complete", 100)
 
-    return transformed_cloud, rigid, result_icp.fitness
+    return transformed_cloud, rigid, fitness
 
 
 def check_headpoints(mri_cloud, meg_data_path, X21):

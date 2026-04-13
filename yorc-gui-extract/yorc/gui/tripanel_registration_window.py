@@ -52,7 +52,7 @@ from yorc.core.io_utils import (
     load_point_cloud,
 )
 from yorc.core.bids_integration import export_bids_fiducials
-from yorc.core.landmark_detection import find_landmarks
+from yorc.core.landmark_detection import detect_landmark_candidates, find_landmarks
 from yorc.core.registration import (
     HELMET_STICKER_POSITIONS,
     extract_meg_sensor_contact_and_detector_points,
@@ -155,6 +155,8 @@ def _load_any_geometry(
                     mesh.compute_vertex_normals()
                 cloud = o3d.geometry.PointCloud()
                 cloud.points = o3d.utility.Vector3dVector(np.asarray(mesh.vertices))
+                if mesh.has_vertex_colors():
+                    cloud.colors = o3d.utility.Vector3dVector(np.asarray(mesh.vertex_colors))
                 return cloud, mesh
         except Exception:
             pass
@@ -294,7 +296,8 @@ class _SensorPreviewWorker(QObject):
 
 class _AutoHelmetFiducialsWorker(QObject):
     progress = pyqtSignal(str)
-    finished = pyqtSignal(object, object)
+    candidates_ready = pyqtSignal(object, object)
+    finished = pyqtSignal(object, object, object)
     failed = pyqtSignal(str)
 
     def __init__(self, inside_cloud: o3d.geometry.PointCloud) -> None:
@@ -334,15 +337,23 @@ class _AutoHelmetFiducialsWorker(QObject):
                 )
 
             self.progress.emit("Auto fiducials: detecting red/green helmet markers...")
-            landmarks = find_landmarks(cloud)
+            diagnostics = detect_landmark_candidates(cloud)
+            self.candidates_ready.emit(
+                np.asarray(diagnostics["candidate_centers"]), diagnostics
+            )
+            landmarks = diagnostics["selected_centers"]
             if landmarks is None:
-                raise ValueError("Could not automatically detect 5-7 helmet fiducials.")
+                raise ValueError(diagnostics["message"])
 
             X1, detected_landmarks, errors = head_to_helmet(cloud, landmarks=landmarks)
             if X1 is None or detected_landmarks is None:
                 raise ValueError("Automatic helmet fiducial registration failed.")
 
-            self.finished.emit(np.asarray(detected_landmarks), np.asarray(errors, dtype=float))
+            self.finished.emit(
+                np.asarray(detected_landmarks),
+                np.asarray(errors, dtype=float),
+                diagnostics,
+            )
         except Exception as exc:
             self.failed.emit(str(exc))
 
@@ -361,6 +372,7 @@ class _TransformComputeWorker(QObject):
         picks: dict,
         fast_mode: bool = True,
         stabilize_icp: bool = False,
+        legacy_mode: bool = False,
     ) -> None:
         super().__init__()
         self.inside_cloud = inside_cloud
@@ -370,6 +382,7 @@ class _TransformComputeWorker(QObject):
         self.picks = picks
         self.fast_mode = fast_mode
         self.stabilize_icp = stabilize_icp
+        self.legacy_mode = legacy_mode
 
     @staticmethod
     def _compute_p2p(source_points: np.ndarray, target_points: np.ndarray) -> np.ndarray:
@@ -537,6 +550,107 @@ class _TransformComputeWorker(QObject):
             Xstd, outside_standard_cloud = head_to_standard(
                 self.outside_cloud, self.picks["outside_anat"]
             )
+
+            if self.legacy_mode:
+                self.progress.emit(
+                    "Legacy mode: using auto/global registration for X2 and anatomy-anchored MRI registration for X3."
+                )
+
+                legacy_inside_cloud = self._downsample_cloud(self.inside_cloud, max_points=100000)
+                legacy_outside_cloud = self._downsample_cloud(
+                    outside_standard_cloud, max_points=100000
+                )
+                legacy_mri_cloud = self._downsample_cloud(self.mri_cloud, max_points=100000)
+                self.progress.emit(
+                    "Legacy mode cloud sizes: "
+                    f"inside={len(np.asarray(legacy_inside_cloud.points)):,}, "
+                    f"outside={len(np.asarray(legacy_outside_cloud.points)):,}, "
+                    f"mri={len(np.asarray(legacy_mri_cloud.points)):,}"
+                )
+
+                self.progress.emit("Computing X2 (inside -> head/standard) with global registration + ICP...")
+                x2_before_stats = {"mean": float("nan"), "max": float("nan")}
+                X2, fit2 = head_to_head(
+                    legacy_outside_cloud,
+                    legacy_inside_cloud,
+                    progress_callback=lambda msg, _pct: self.progress.emit(f"X2: {msg}"),
+                )
+                X2 = project_to_rigid_transform(X2)
+                if self.stabilize_icp:
+                    X2, fit2, x2_rmse = self._stabilize_icp_transform(
+                        legacy_inside_cloud,
+                        legacy_outside_cloud,
+                        X2,
+                        threshold_mm=2.0,
+                        max_iteration=2000,
+                        max_rounds=4,
+                        rmse_tol=0.01,
+                        label="X2",
+                    )
+                else:
+                    x2_rmse = self._distance_rmse(legacy_inside_cloud, legacy_outside_cloud, X2)
+                x2_after_stats = self._distance_stats(legacy_inside_cloud, legacy_outside_cloud, X2)
+                self.progress.emit(f"ICP X2 refine: fitness={fit2:.4f}, rmse={x2_rmse:.4f} mm")
+
+                X21 = project_to_rigid_transform(X2 @ X1)
+                self.progress.emit("Computed X21 = X2 @ X1")
+
+                self.progress.emit("Computing X3 (MRI -> head/standard) from matching anatomy points + ICP...")
+                outside_anat_std = TriplePanelRegistrationWindow._transform_points(
+                    self.picks["outside_anat"], Xstd
+                )
+                x3_init = self._compute_p2p(self.picks["mri_facial"], outside_anat_std)
+                x3_init = project_to_rigid_transform(x3_init)
+                x3_before_stats = self._distance_stats(legacy_mri_cloud, legacy_outside_cloud, x3_init)
+                X3, fit3, x3_rmse = self._refine_icp(
+                    legacy_mri_cloud,
+                    legacy_outside_cloud,
+                    x3_init,
+                    threshold_mm=2.5,
+                    max_iteration=2000,
+                )
+                X3 = project_to_rigid_transform(X3)
+                mri_registered_cloud = copy.deepcopy(self.mri_cloud)
+                mri_registered_cloud.transform(X3)
+                if self.stabilize_icp:
+                    X3, fit3, x3_rmse = self._stabilize_icp_transform(
+                        legacy_mri_cloud,
+                        legacy_outside_cloud,
+                        X3,
+                        threshold_mm=2.0,
+                        max_iteration=2000,
+                        max_rounds=4,
+                        rmse_tol=0.01,
+                        label="X3",
+                    )
+                    mri_registered_cloud = copy.deepcopy(self.mri_cloud)
+                    mri_registered_cloud.transform(X3)
+                x3_after_stats = self._distance_stats(legacy_mri_cloud, legacy_outside_cloud, X3)
+                self.progress.emit(f"ICP X3 refine: fitness={fit3:.4f}, rmse={x3_rmse:.4f} mm")
+
+                refinement_stats = {
+                    "x2": {
+                        "source_points": int(len(np.asarray(legacy_inside_cloud.points))),
+                        "target_points": int(len(np.asarray(legacy_outside_cloud.points))),
+                        "fitness": fit2,
+                        "rmse": x2_rmse,
+                        "before": x2_before_stats,
+                        "after": x2_after_stats,
+                    },
+                    "x3": {
+                        "source_points": int(len(np.asarray(legacy_mri_cloud.points))),
+                        "target_points": int(len(np.asarray(legacy_outside_cloud.points))),
+                        "fitness": fit3,
+                        "rmse": x3_rmse,
+                        "before": x3_before_stats,
+                        "after": x3_after_stats,
+                    },
+                }
+                self.finished.emit(
+                    X1, X2, X3, X21, outside_standard_cloud, mri_registered_cloud, refinement_stats
+                )
+                return
+
             outside_facial_std = TriplePanelRegistrationWindow._transform_points(
                 self.picks["outside_facial"], Xstd
             )
@@ -781,10 +895,12 @@ class TriplePanelRegistrationWindow(QMainWindow):
     }
     """
     _PICK_STEP_DEFAULT_STYLE = (
-        "QPushButton { background-color: #2a3341; border: 1px solid #415269; color: #e6edf7; }"
+        "QPushButton { background-color: #2a3341; border: 1px solid #415269; color: #e6edf7; } "
+        "QPushButton:disabled { background-color: #1a2029; border: 1px solid #2a323d; color: #7e8998; }"
     )
     _PICK_STEP_DONE_STYLE = (
-        "QPushButton { background-color: #2e6b45; border: 1px solid #4f9a6b; color: #f3fff6; }"
+        "QPushButton { background-color: #2e6b45; border: 1px solid #4f9a6b; color: #f3fff6; } "
+        "QPushButton:disabled { background-color: #1f2a24; border: 1px solid #304036; color: #7f9586; }"
     )
 
     def __init__(self, viewer_backend: str = "pyvista") -> None:
@@ -826,6 +942,7 @@ class TriplePanelRegistrationWindow(QMainWindow):
         self._is_auto_detecting = False
 
         self._build_ui()
+        self._on_legacy_mode_toggled(True)
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -843,6 +960,7 @@ class TriplePanelRegistrationWindow(QMainWindow):
         root_layout = QVBoxLayout(root)
 
         root_layout.addWidget(self._build_files_group())
+        root_layout.addWidget(self._build_modes_group())
         root_layout.addWidget(self._build_actions_group())
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -1066,18 +1184,6 @@ class TriplePanelRegistrationWindow(QMainWindow):
         self.compute_btn.clicked.connect(self.compute_transforms)
         layout.addWidget(self.compute_btn)
 
-        self.fast_mode_check = QCheckBox("Fast Mode")
-        self.fast_mode_check.setChecked(True)
-        self.fast_mode_check.setToolTip("Use cropped/downsampled ICP for faster transforms.")
-        layout.addWidget(self.fast_mode_check)
-
-        self.stabilize_icp_check = QCheckBox("Stabilize ICP")
-        self.stabilize_icp_check.setChecked(False)
-        self.stabilize_icp_check.setToolTip(
-            "Run extra ICP rounds until RMSE change is small (slower, may improve fit)."
-        )
-        layout.addWidget(self.stabilize_icp_check)
-
         self.preview_btn = QPushButton("8) Preview Sensors")
         self.preview_btn.clicked.connect(self.preview_sensors)
         layout.addWidget(self.preview_btn)
@@ -1131,6 +1237,55 @@ class TriplePanelRegistrationWindow(QMainWindow):
         self._refresh_pick_step_styles()
 
         return group
+
+    def _build_modes_group(self) -> QGroupBox:
+        group = QGroupBox("Modes")
+        layout = QHBoxLayout(group)
+
+        self.fast_mode_check = QCheckBox("Fast Mode")
+        self.fast_mode_check.setChecked(True)
+        self.fast_mode_check.setToolTip("Use cropped/downsampled ICP for faster transforms.")
+        layout.addWidget(self.fast_mode_check)
+
+        self.stabilize_icp_check = QCheckBox("Stabilize ICP")
+        self.stabilize_icp_check.setChecked(False)
+        self.stabilize_icp_check.setToolTip(
+            "Run extra ICP rounds until RMSE change is small (slower, may improve fit)."
+        )
+        layout.addWidget(self.stabilize_icp_check)
+
+        self.legacy_mode_check = QCheckBox("Legacy Mode")
+        self.legacy_mode_check.setChecked(True)
+        self.legacy_mode_check.setToolTip(
+            "Use inside helmet fiducials plus matching outside and MRI anatomy picks (RPA, LPA, Nasion) for a more robust legacy-style workflow."
+        )
+        self.legacy_mode_check.toggled.connect(self._on_legacy_mode_toggled)
+        layout.addWidget(self.legacy_mode_check)
+
+        layout.addStretch(1)
+        return group
+
+    def _on_legacy_mode_toggled(self, enabled: bool) -> None:
+        inside_face_button = getattr(self, "pick_inside_face_btn", None)
+        outside_face_button = getattr(self, "pick_outside_face_btn", None)
+        mri_face_button = getattr(self, "pick_mri_face_btn", None)
+
+        if inside_face_button is not None:
+            inside_face_button.setEnabled(not enabled)
+        if outside_face_button is not None:
+            outside_face_button.setEnabled(not enabled)
+        if mri_face_button is not None:
+            mri_face_button.setEnabled(True)
+            mri_face_button.setText("6) Pick MRI Anatomy (3)" if enabled else "6) Pick MRI Face (3)")
+
+        if enabled:
+            self._log(
+                "Legacy mode enabled: pick outside and MRI points as the same anatomy landmarks: RPA, LPA, Nasion."
+            )
+        else:
+            self._log(
+                "Legacy mode disabled: tri-panel facial picks are required for X2/X3 initialization."
+            )
 
     def _path_row(self, placeholder: str) -> tuple[QLineEdit, QPushButton]:
         edit = QLineEdit()
@@ -1193,6 +1348,8 @@ class TriplePanelRegistrationWindow(QMainWindow):
         self.stabilize_icp_check.setEnabled(not computing)
         if computing:
             self.statusBar().showMessage("Computing transforms...")
+        else:
+            self.statusBar().clearMessage()
 
     def _show_error(self, message: str) -> None:
         QMessageBox.critical(self, "Error", message)
@@ -1500,6 +1657,45 @@ class TriplePanelRegistrationWindow(QMainWindow):
         for geom_name in [name for name in geometries if name.startswith(prefix)]:
             view.remove_geometry(geom_name)
 
+    def _clear_auto_candidate_markers(self) -> None:
+        geometries = getattr(self.inside_view, "geometries", {})
+        if not isinstance(geometries, dict):
+            return
+        prefix = "auto_inside_candidates_"
+        for geom_name in [name for name in geometries if name.startswith(prefix)]:
+            self.inside_view.remove_geometry(geom_name)
+
+    def _show_auto_candidate_markers(self, points: np.ndarray) -> None:
+        self._clear_auto_candidate_markers()
+        if points is None or len(points) == 0:
+            return
+        self.inside_view.add_sphere_markers(
+            np.asarray(points), radius=2.0, color="yellow", name="auto_inside_candidates"
+        )
+
+    @staticmethod
+    def _format_auto_detection_summary(diagnostics: dict) -> str:
+        cluster_counts = diagnostics.get("candidate_counts")
+        if isinstance(cluster_counts, np.ndarray):
+            cluster_counts = cluster_counts.tolist()
+        counts_text = ", ".join(str(int(value)) for value in (cluster_counts or []))
+        if not counts_text:
+            counts_text = "none"
+
+        summary = (
+            "Auto fiducials: "
+            f"overlap={int(diagnostics.get('n_unique_overlap_points', 0))} points, "
+            f"clusters={int(diagnostics.get('n_clusters', 0))}, "
+            f"sizes=[{counts_text}]"
+        )
+        if diagnostics.get("used_largest_subset"):
+            selected_counts = diagnostics.get("selected_counts")
+            if isinstance(selected_counts, np.ndarray):
+                selected_counts = selected_counts.tolist()
+            kept_text = ", ".join(str(int(value)) for value in (selected_counts or []))
+            summary += f"; keeping largest clusters [{kept_text}]"
+        return summary
+
     def save_picks(self) -> None:
         serializable = {
             key: value.tolist() if value is not None else None for key, value in self.picks.items()
@@ -1590,6 +1786,7 @@ class TriplePanelRegistrationWindow(QMainWindow):
 
         self._auto_inside_thread.started.connect(self._auto_inside_worker.run)
         self._auto_inside_worker.progress.connect(self._log)
+        self._auto_inside_worker.candidates_ready.connect(self._on_auto_inside_candidates_ready)
         self._auto_inside_worker.finished.connect(self._on_auto_inside_fiducials_finished)
         self._auto_inside_worker.failed.connect(self._on_auto_inside_fiducials_failed)
         self._auto_inside_worker.finished.connect(self._auto_inside_thread.quit)
@@ -1599,7 +1796,13 @@ class TriplePanelRegistrationWindow(QMainWindow):
 
         self._auto_inside_thread.start()
 
-    def _on_auto_inside_fiducials_finished(self, landmarks: np.ndarray, errors: np.ndarray) -> None:
+    def _on_auto_inside_candidates_ready(self, candidate_centers: np.ndarray, diagnostics: dict) -> None:
+        self._show_auto_candidate_markers(np.asarray(candidate_centers))
+        self._log(self._format_auto_detection_summary(diagnostics))
+
+    def _on_auto_inside_fiducials_finished(
+        self, landmarks: np.ndarray, errors: np.ndarray, diagnostics: dict
+    ) -> None:
         try:
             self._store_picks("inside_fiducials", list(np.asarray(landmarks)), "red", self.inside_view)
             self._log(
@@ -1607,6 +1810,8 @@ class TriplePanelRegistrationWindow(QMainWindow):
                 f"n={len(landmarks)}, mean error={float(np.mean(errors)):.3f} mm, "
                 f"max error={float(np.max(errors)):.3f} mm"
             )
+            if diagnostics.get("used_largest_subset"):
+                self._log(diagnostics["message"])
         finally:
             self._set_auto_detect_state(False)
 
@@ -1660,7 +1865,10 @@ class TriplePanelRegistrationWindow(QMainWindow):
         if self.mri_cloud is None:
             self._show_error("Load data first.")
             return
-        self._log("Pick corresponding 3 facial points in MRI panel: Right eye, Left eye, Nose.")
+        if self.legacy_mode_check.isChecked():
+            self._log("Pick corresponding 3 anatomy points in MRI panel: RPA, LPA, Nasion.")
+        else:
+            self._log("Pick corresponding 3 facial points in MRI panel: Right eye, Left eye, Nose.")
         self.mri_view.enable_picking(
             mode="mri_facial",
             num_points=3,
@@ -1700,13 +1908,12 @@ class TriplePanelRegistrationWindow(QMainWindow):
             self._log("Transform computation already in progress...")
             return
 
-        required = [
-            "inside_fiducials",
-            "inside_facial",
-            "outside_anat",
-            "outside_facial",
-            "mri_facial",
-        ]
+        legacy_mode = bool(self.legacy_mode_check.isChecked())
+        required = ["inside_fiducials", "outside_anat"]
+        if legacy_mode:
+            required.append("mri_facial")
+        else:
+            required.extend(["inside_facial", "outside_facial", "mri_facial"])
         missing = [k for k in required if self.picks.get(k) is None]
         if missing:
             self._show_error(f"Missing picks: {', '.join(missing)}")
@@ -1723,7 +1930,8 @@ class TriplePanelRegistrationWindow(QMainWindow):
         self._log(
             "Starting transform computation "
             f"({'FAST' if fast_mode else 'FULL'} mode, "
-            f"{'stabilized' if stabilize_icp else 'single-pass'})..."
+            f"{'stabilized' if stabilize_icp else 'single-pass'}, "
+            f"{'legacy' if legacy_mode else 'tri-panel'})..."
         )
 
         worker_picks = {k: np.asarray(v).copy() for k, v in self.picks.items() if v is not None}
@@ -1737,6 +1945,7 @@ class TriplePanelRegistrationWindow(QMainWindow):
             worker_picks,
             fast_mode=fast_mode,
             stabilize_icp=stabilize_icp,
+            legacy_mode=legacy_mode,
         )
         self._compute_worker.moveToThread(self._compute_thread)
 
