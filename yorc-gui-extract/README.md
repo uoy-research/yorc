@@ -61,8 +61,10 @@ Then launch the GUI with the sample files pre-loaded:
 ## What This Extract Includes
 
 - Tripanel launcher and UI logic
+- Automatic helmet fiducial detection from red/green sticker markers
 - Core registration pipeline
 - Supporting utilities required at runtime
+- BIDS fiducial export to MEG FIF metadata and T1 JSON sidecars
 - Sample data download and launch scripts
 - HTML user docs and image assets
 

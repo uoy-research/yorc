@@ -134,6 +134,8 @@ Available flags:
 - `-om, --outside-mesh` — outside head scan (`.ply/.stl/.obj/.pcd`)
 - `-s, --mri-scalp` — MRI scalp surface (`.fif/.ply/.stl/.obj`)
 - `-m, --megdata` — MEG FIF file
+- `--subject-t1` — optional BIDS subject T1 (`.nii/.nii.gz`) for fiducial export
+- `--talairach-transform` — optional FreeSurfer `talairach.xfm` for fiducial export
 - `--auto-load` — trigger Load Data automatically on startup
 - `--renderer {auto, pyvista, native-vtk}` — 3D backend (default: auto)
 
@@ -144,15 +146,19 @@ Notes:
 ## 9. In-GUI Workflow
 
 1. `Load Data` (or auto-load from CLI)
-2. Pick points in order:
+2. For the inside helmet panel, either:
+  1. click `Auto Helmet Fids`, or
+  2. manually pick the 7 inside fiducials
+3. Pick the remaining points in order:
    1. Inside fiducials (7)
    2. Outside anatomy (3)
    3. Inside face (3)
    4. Outside face (3)
    5. MRI face (3)
-3. `Compute Transforms`
-4. `Preview Sensors`
-5. `Apply to FIF` (writes transforms)
+4. `Compute Transforms`
+5. `Preview Sensors`
+6. `Apply to FIF` (writes transforms)
+7. Optional: `Export BIDS Fids` (writes BIDS-compatible fiducials to MEG FIF metadata and T1 JSON)
 
 Picking controls:
 - `Shift + Left Click`: add point
@@ -161,6 +167,7 @@ Picking controls:
 Useful controls:
 - `Fast Mode`: faster ICP
 - `Stabilize ICP`: extra ICP rounds
+- `Auto Helmet Fids`: detect red/green helmet stickers automatically
 - `Save Picks` / `Load Picks`: reuse landmarks
 - `Show X2 Overlay`, `Show X3 Overlay`, `Restore Views`
 
@@ -183,6 +190,11 @@ When you click `Apply to FIF`:
 - input MEG FIF is updated with dev->head transform
 - a separate `_trans.fif` (MRI->head) is written beside the MEG file
 
+When you click `Export BIDS Fids`:
+- the selected MEG FIF is updated with matching NAS/LPA/RPA fiducials in head coordinates
+- the selected T1 JSON sidecar is updated with `AnatomicalLandmarkCoordinates`
+- this requires both `BIDS T1` and `Tal XFM` to be set in the GUI
+
 ## 12. Common Issues
 
 If `yorc-tripanel-gui` fails to start:
@@ -198,3 +210,13 @@ If alignment is poor:
 - re-pick landmarks carefully (especially face points)
 - check MRI scalp quality
 - try disabling `Fast Mode` for final pass
+
+If automatic helmet fiducial detection fails:
+- verify the inside scan includes color data
+- verify the helmet stickers are the red/green roundels expected by YORC
+- fall back to manual `Pick Inside Fiducials (7)`
+
+If BIDS export fails:
+- check that the T1 JSON sidecar exists or can be created beside the T1 file
+- check that the FreeSurfer `talairach.xfm` belongs to the same subject as the T1
+- compute transforms before running export

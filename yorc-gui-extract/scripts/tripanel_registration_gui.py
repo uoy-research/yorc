@@ -42,6 +42,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="MEG FIF file path",
     )
     parser.add_argument(
+        "--subject-t1",
+        dest="subject_t1",
+        help="Optional BIDS subject T1 path (.nii/.nii.gz) for fiducial export.",
+    )
+    parser.add_argument(
+        "--talairach-transform",
+        dest="talairach_transform",
+        help="Optional FreeSurfer talairach.xfm path for BIDS fiducial export.",
+    )
+    parser.add_argument(
         "--auto-load",
         action="store_true",
         help="Automatically run the 'Load Data' step on startup if inside/outside/MRI paths are set.",
@@ -68,6 +78,10 @@ def apply_cli_paths(window: TriplePanelRegistrationWindow, args: argparse.Namesp
         window.mri_edit.setText(args.mri_scalp)
     if args.meg_data:
         window.meg_edit.setText(args.meg_data)
+    if args.subject_t1:
+        window.t1_edit.setText(args.subject_t1)
+    if args.talairach_transform:
+        window.talairach_edit.setText(args.talairach_transform)
 
 
 def main(argv: list[str] | None = None) -> None:

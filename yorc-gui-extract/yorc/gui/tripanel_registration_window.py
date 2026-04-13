@@ -1,4 +1,4 @@
-"""Three-panel registration GUI for manual landmark-driven alignment.
+"""Three-panel registration GUI for landmark-driven alignment.
 
 Panels:
 - Inside LIDAR scan
@@ -51,10 +51,13 @@ from yorc.core.io_utils import (
     load_mesh_for_display,
     load_point_cloud,
 )
+from yorc.core.bids_integration import export_bids_fiducials
+from yorc.core.landmark_detection import find_landmarks
 from yorc.core.registration import (
     HELMET_STICKER_POSITIONS,
     extract_meg_sensor_contact_and_detector_points,
     extract_meg_sensor_detector_points,
+    head_to_helmet,
     head_to_head,
     head_to_mri,
     head_to_standard,
@@ -289,6 +292,61 @@ class _SensorPreviewWorker(QObject):
             self.failed.emit(str(exc))
 
 
+class _AutoHelmetFiducialsWorker(QObject):
+    progress = pyqtSignal(str)
+    finished = pyqtSignal(object, object)
+    failed = pyqtSignal(str)
+
+    def __init__(self, inside_cloud: o3d.geometry.PointCloud) -> None:
+        super().__init__()
+        self.inside_cloud = inside_cloud
+
+    @staticmethod
+    def _downsample_colored_cloud(
+        cloud: o3d.geometry.PointCloud, max_points: int = 200000
+    ) -> o3d.geometry.PointCloud:
+        points = np.asarray(cloud.points)
+        if len(points) <= max_points:
+            return cloud
+
+        rng = np.random.default_rng(42)
+        idx = rng.choice(len(points), size=max_points, replace=False)
+        sampled = o3d.geometry.PointCloud()
+        sampled.points = o3d.utility.Vector3dVector(points[idx])
+        if cloud.has_colors():
+            sampled.colors = o3d.utility.Vector3dVector(np.asarray(cloud.colors)[idx])
+        if cloud.has_normals():
+            sampled.normals = o3d.utility.Vector3dVector(np.asarray(cloud.normals)[idx])
+        return sampled
+
+    def run(self) -> None:
+        try:
+            cloud = copy.deepcopy(self.inside_cloud)
+            if not cloud.has_colors():
+                raise ValueError("Inside cloud has no color data; automatic fiducial detection needs red/green helmet markers.")
+
+            original_points = len(np.asarray(cloud.points))
+            cloud = self._downsample_colored_cloud(cloud)
+            sampled_points = len(np.asarray(cloud.points))
+            if sampled_points != original_points:
+                self.progress.emit(
+                    f"Auto fiducials: downsampled colored inside cloud {original_points:,} -> {sampled_points:,} points"
+                )
+
+            self.progress.emit("Auto fiducials: detecting red/green helmet markers...")
+            landmarks = find_landmarks(cloud)
+            if landmarks is None:
+                raise ValueError("Could not automatically detect 5-7 helmet fiducials.")
+
+            X1, detected_landmarks, errors = head_to_helmet(cloud, landmarks=landmarks)
+            if X1 is None or detected_landmarks is None:
+                raise ValueError("Automatic helmet fiducial registration failed.")
+
+            self.finished.emit(np.asarray(detected_landmarks), np.asarray(errors, dtype=float))
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 class _TransformComputeWorker(QObject):
     progress = pyqtSignal(str)
     finished = pyqtSignal(object, object, object, object, object, object, object)
@@ -461,9 +519,19 @@ class _TransformComputeWorker(QObject):
 
     def run(self) -> None:
         try:
-            self.progress.emit("Computing X1 (device -> inside) from 7 fiducials...")
-            X1 = self._compute_p2p(HELMET_STICKER_POSITIONS, self.picks["inside_fiducials"])
-            X1 = project_to_rigid_transform(X1)
+            self.progress.emit("Computing X1 (device -> inside) from helmet fiducials...")
+            X1, _detected_landmarks, helmet_errors = head_to_helmet(
+                self.inside_cloud,
+                landmarks=self.picks["inside_fiducials"],
+            )
+            if X1 is None:
+                raise ValueError("Could not compute X1 from helmet fiducials.")
+            if helmet_errors is not None and len(helmet_errors) > 0:
+                self.progress.emit(
+                    "X1 landmark fit: "
+                    f"mean={float(np.mean(helmet_errors)):.3f} mm, "
+                    f"max={float(np.max(helmet_errors)):.3f} mm"
+                )
 
             self.progress.emit("Computing outside->standard transform from anatomy points...")
             Xstd, outside_standard_cloud = head_to_standard(
@@ -755,6 +823,7 @@ class TriplePanelRegistrationWindow(QMainWindow):
         self._is_loading = False
         self._is_computing = False
         self._is_previewing = False
+        self._is_auto_detecting = False
 
         self._build_ui()
 
@@ -915,6 +984,8 @@ class TriplePanelRegistrationWindow(QMainWindow):
         self.outside_edit, outside_btn = self._path_row("Outside LIDAR (.ply/.stl/.obj)")
         self.mri_edit, mri_btn = self._path_row("MRI scalp (.fif/.ply/.stl/.obj)")
         self.meg_edit, meg_btn = self._path_row("MEG file (.fif)")
+        self.t1_edit, t1_btn = self._path_row("Subject T1 (.nii/.nii.gz)")
+        self.talairach_edit, talairach_btn = self._path_row("FreeSurfer talairach.xfm")
 
         inside_btn.clicked.connect(
             lambda: self._browse(self.inside_edit, "Mesh/Cloud", "*.ply *.stl *.obj *.pcd")
@@ -926,6 +997,12 @@ class TriplePanelRegistrationWindow(QMainWindow):
             lambda: self._browse(self.mri_edit, "MRI surface", "*.fif *.ply *.stl *.obj")
         )
         meg_btn.clicked.connect(lambda: self._browse(self.meg_edit, "MEG file", "*.fif"))
+        t1_btn.clicked.connect(
+            lambda: self._browse(self.t1_edit, "Subject T1", "*.nii *.nii.gz")
+        )
+        talairach_btn.clicked.connect(
+            lambda: self._browse(self.talairach_edit, "Talairach transform", "*.xfm")
+        )
 
         layout.addWidget(QLabel("Inside:"), 0, 0)
         layout.addWidget(self.inside_edit, 0, 1)
@@ -943,6 +1020,14 @@ class TriplePanelRegistrationWindow(QMainWindow):
         layout.addWidget(self.meg_edit, 3, 1)
         layout.addWidget(meg_btn, 3, 2)
 
+        layout.addWidget(QLabel("BIDS T1:"), 4, 0)
+        layout.addWidget(self.t1_edit, 4, 1)
+        layout.addWidget(t1_btn, 4, 2)
+
+        layout.addWidget(QLabel("Tal XFM:"), 5, 0)
+        layout.addWidget(self.talairach_edit, 5, 1)
+        layout.addWidget(talairach_btn, 5, 2)
+
         return group
 
     def _build_actions_group(self) -> QGroupBox:
@@ -956,6 +1041,10 @@ class TriplePanelRegistrationWindow(QMainWindow):
         self.pick_inside_btn = QPushButton("2) Pick Inside Fiducials (7)")
         self.pick_inside_btn.clicked.connect(self.pick_inside_fiducials)
         layout.addWidget(self.pick_inside_btn)
+
+        self.auto_inside_btn = QPushButton("Auto Helmet Fids")
+        self.auto_inside_btn.clicked.connect(self.auto_detect_inside_fiducials)
+        layout.addWidget(self.auto_inside_btn)
 
         self.pick_outside_anat_btn = QPushButton("3) Pick Outside Anatomy (3)")
         self.pick_outside_anat_btn.clicked.connect(self.pick_outside_anatomy)
@@ -1007,6 +1096,10 @@ class TriplePanelRegistrationWindow(QMainWindow):
         self.apply_btn = QPushButton("9) Apply to FIF")
         self.apply_btn.clicked.connect(self.apply_to_fif)
         layout.addWidget(self.apply_btn)
+
+        self.export_bids_btn = QPushButton("Export BIDS Fids")
+        self.export_bids_btn.clicked.connect(self.export_bids_metadata)
+        layout.addWidget(self.export_bids_btn)
 
         self.save_picks_btn = QPushButton("Save Picks")
         self.save_picks_btn.clicked.connect(self.save_picks)
@@ -1083,6 +1176,15 @@ class TriplePanelRegistrationWindow(QMainWindow):
         self.sensor_display_mode.setEnabled(not previewing)
         if previewing:
             self.statusBar().showMessage("Previewing sensors...")
+
+    def _set_auto_detect_state(self, auto_detecting: bool) -> None:
+        self._is_auto_detecting = auto_detecting
+        self.auto_inside_btn.setEnabled(not auto_detecting)
+        if auto_detecting:
+            self.setCursor(Qt.CursorShape.WaitCursor)
+            self.statusBar().showMessage("Automatically detecting helmet fiducials...")
+        else:
+            self.unsetCursor()
 
     def _set_compute_state(self, computing: bool) -> None:
         self._is_computing = computing
@@ -1470,6 +1572,47 @@ class TriplePanelRegistrationWindow(QMainWindow):
             ),
             clear_callback=lambda: self._on_picks_cleared("inside_fiducials", self.inside_view),
         )
+
+    def auto_detect_inside_fiducials(self) -> None:
+        if self.inside_cloud is None:
+            self._show_error("Load data first.")
+            return
+        if self._is_auto_detecting:
+            self._log("Automatic fiducial detection already in progress...")
+            return
+
+        self._set_auto_detect_state(True)
+        self._log("Starting automatic helmet fiducial detection...")
+
+        self._auto_inside_thread = QThread(self)
+        self._auto_inside_worker = _AutoHelmetFiducialsWorker(copy.deepcopy(self.inside_cloud))
+        self._auto_inside_worker.moveToThread(self._auto_inside_thread)
+
+        self._auto_inside_thread.started.connect(self._auto_inside_worker.run)
+        self._auto_inside_worker.progress.connect(self._log)
+        self._auto_inside_worker.finished.connect(self._on_auto_inside_fiducials_finished)
+        self._auto_inside_worker.failed.connect(self._on_auto_inside_fiducials_failed)
+        self._auto_inside_worker.finished.connect(self._auto_inside_thread.quit)
+        self._auto_inside_worker.failed.connect(self._auto_inside_thread.quit)
+        self._auto_inside_thread.finished.connect(self._auto_inside_worker.deleteLater)
+        self._auto_inside_thread.finished.connect(self._auto_inside_thread.deleteLater)
+
+        self._auto_inside_thread.start()
+
+    def _on_auto_inside_fiducials_finished(self, landmarks: np.ndarray, errors: np.ndarray) -> None:
+        try:
+            self._store_picks("inside_fiducials", list(np.asarray(landmarks)), "red", self.inside_view)
+            self._log(
+                "✅ Auto-detected helmet fiducials: "
+                f"n={len(landmarks)}, mean error={float(np.mean(errors)):.3f} mm, "
+                f"max error={float(np.max(errors)):.3f} mm"
+            )
+        finally:
+            self._set_auto_detect_state(False)
+
+    def _on_auto_inside_fiducials_failed(self, message: str) -> None:
+        self._set_auto_detect_state(False)
+        self._show_error(f"Automatic fiducial detection failed: {message}")
 
     def pick_outside_anatomy(self) -> None:
         if self.outside_cloud is None:
@@ -2053,3 +2196,36 @@ class TriplePanelRegistrationWindow(QMainWindow):
             QMessageBox.information(self, "Done", f"Transforms written to:\n{out_path}")
         except Exception as exc:
             self._show_error(f"Failed to apply transforms: {exc}")
+
+    def export_bids_metadata(self) -> None:
+        meg_path = self.meg_edit.text().strip()
+        t1_path = self.t1_edit.text().strip()
+        talairach_path = self.talairach_edit.text().strip()
+
+        if not meg_path:
+            self._show_error("Select a MEG .fif file.")
+            return
+        if not t1_path or not talairach_path:
+            self._show_error("Select both BIDS T1 and Talairach transform paths.")
+            return
+        if self.X21 is None or self.X3 is None:
+            self._show_error("Compute transforms first.")
+            return
+
+        try:
+            meg_out, json_out = export_bids_fiducials(
+                meg_data_path=meg_path,
+                talairach_xfm_path=talairach_path,
+                t1_path=t1_path,
+                dev_head_transform=self.X21,
+                mri_to_head_transform=self.X3,
+            )
+            self._log(f"✅ Wrote BIDS-compatible MEG fiducials: {meg_out}")
+            self._log(f"✅ Wrote BIDS MRI landmarks JSON: {json_out}")
+            QMessageBox.information(
+                self,
+                "BIDS Fiducials Exported",
+                f"Updated MEG file:\n{meg_out}\n\nUpdated MRI JSON:\n{json_out}",
+            )
+        except Exception as exc:
+            self._show_error(f"Failed to export BIDS fiducials: {exc}")
