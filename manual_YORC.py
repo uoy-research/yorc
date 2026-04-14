@@ -385,6 +385,7 @@ def check_headpoints(mri_cloud, datafile, X21):
 
 
 def write_ouput(datafile, X21, X3):
+    import open3d as o3d
     # Write the results to file
     raw = mne.io.read_raw_fif(datafile, 'default', preload=True)
     dev_head_t = mne.transforms.Transform("meg", "head", trans=None)
@@ -395,6 +396,25 @@ def write_ouput(datafile, X21, X3):
     # but rotation is fine
     dev_head_t['trans'][0:3, 3] = np.divide(dev_head_t['trans'][0:3, 3], 1000)
     raw.info.update(dev_head_t=dev_head_t)
+
+    # Generate head points from sensor locations to use as digitization points
+    head_points = []
+    for chan in raw.info['chs']:
+        head_points.append([chan['loc'][0] - chan['loc'][9] * sensor_length,
+                            chan['loc'][1] - chan['loc'][10] * sensor_length,
+                            chan['loc'][2] - chan['loc'][11] * sensor_length])
+    head_points = np.array(head_points)
+
+    # Make points into cloud
+    head_point_cloud = o3d.geometry.PointCloud()
+    head_point_cloud.points = o3d.utility.Vector3dVector(head_points)
+    # Transform to head reference frame
+    head_point_cloud.transform(dev_head_t['trans'])
+    head_points = np.asarray(head_point_cloud.points)
+    # Add digitization points generated from sensor positions
+    montage = mne.channels.make_dig_montage(hsp=head_points, coord_frame='head')
+    raw.set_montage(montage)
+
     raw.save(datafile, overwrite=True)
 
     # Write seperate trans file for MRI->head transform
@@ -408,7 +428,7 @@ def write_ouput(datafile, X21, X3):
     def is_file(file):
         if not os.path.isfile(file):
             print(f'Error with {file}.')
-            return false
+            return False
         else:
             return True
 
