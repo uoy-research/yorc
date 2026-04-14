@@ -451,7 +451,20 @@ def write_ouput(datafile, X21, X3):
     head_point_cloud.transform(dev_head_t['trans'])
     head_points = np.asarray(head_point_cloud.points)
     # Add digitization points generated from sensor positions
-    montage = mne.channels.make_dig_montage(hsp=head_points, coord_frame='head')
+    # Get existing montage and add our extrapolated headshape points
+    existing_montage =  mne.channels.read_dig_fif(datafile)
+    existing_montage_dict = existing_montage.get_positions()
+
+    lpa = existing_montage_dict['lpa']
+    rpa = existing_montage_dict['rpa']
+    nasion = existing_montage_dict['nasion']
+    hpi = existing_montage_dict['hpi']
+    hsp = headpoints
+
+    montage = mne.channels.make_dig_montage(hsp=hsp, lpa=lpa, rpa=rpa, 
+                                            nasion=nasion, hpi=hpi, 
+                                            coord_frame='head')
+
     raw.set_montage(montage)
 
     raw.save(datafile, overwrite=True)
