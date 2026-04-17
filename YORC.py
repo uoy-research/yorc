@@ -425,6 +425,7 @@ def check_headpoints(mri_cloud, datafile, X21):
 
 def write_ouput(datafile, X21, X3):
     import open3d as o3d
+    from mne.transforms import apply_trans
     # Write the results to file
     raw = mne.io.read_raw_fif(datafile, 'default', preload=True)
     dev_head_t = mne.transforms.Transform("meg", "head", trans=None)
@@ -434,7 +435,6 @@ def write_ouput(datafile, X21, X3):
     # so translation elements of transform have to be re-scaled
     # but rotation is fine
     dev_head_t['trans'][0:3, 3] = np.divide(dev_head_t['trans'][0:3, 3], 1000)
-    raw.info.update(dev_head_t=dev_head_t)
 
     # Generate head points from sensor locations to use as digitization points
     head_points = []
@@ -450,21 +450,40 @@ def write_ouput(datafile, X21, X3):
     # Transform to head reference frame
     head_point_cloud.transform(dev_head_t['trans'])
     head_points = np.asarray(head_point_cloud.points)
-    # Add digitization points generated from sensor positions
-    # Get existing montage and add our extrapolated headshape points
+    # Get existing montage
     existing_montage =  mne.channels.read_dig_fif(datafile)
     existing_montage_dict = existing_montage.get_positions()
+    # inverse existing transform to get to dev coords then
+    # apply LIDAR trans to get to YORC head coords
+    existing_dev_head_t = raw.info['dev_head_t']
+    existing_trans = existing_dev_head_t['trans']
+    itrans = np.linalg.inv(existing_trans)
 
     lpa = existing_montage_dict['lpa']
-    rpa = existing_montage_dict['rpa']
-    nasion = existing_montage_dict['nasion']
-    hpi = existing_montage_dict['hpi']
-    hsp = headpoints
+    lpa = apply_trans(itrans, lpa)
+    lpa = apply_trans(dev_head_t['trans'], lpa)
 
+    rpa = existing_montage_dict['rpa']
+    rpa = apply_trans(itrans, rpa)
+    rpa = apply_trans(dev_head_t['trans'], rpa)
+
+    nasion = existing_montage_dict['nasion']
+    nasion = apply_trans(itrans, nasion)
+    nasion = apply_trans(dev_head_t['trans'], nasion)
+
+    hpi = existing_montage_dict['hpi']
+    hpi = apply_trans(itrans, hpi)
+    hpi = apply_trans(dev_head_t['trans'], hpi)
+
+    # Add in dig points based on extrapolation of sensor positions
+    # after LIDAR coregistration
+    hsp = head_points
+    
     montage = mne.channels.make_dig_montage(hsp=hsp, lpa=lpa, rpa=rpa, 
                                             nasion=nasion, hpi=hpi, 
                                             coord_frame='head')
-
+    
+    raw.info.update(dev_head_t=dev_head_t)
     raw.set_montage(montage)
 
     raw.save(datafile, overwrite=True)
