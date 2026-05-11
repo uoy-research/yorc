@@ -114,6 +114,10 @@ Alex Wade - University of York
 
 Joe Lyons - University of York
 
+## How to cite this material
+Please cite this tool using this DOI:
+http://doi.org/10.5281/zenodo.20119082
+
 ## License
 Copyright (c) The University of York.
 All rights reserved.
